@@ -1,0 +1,86 @@
+{
+  "name": "aiproxybridge",
+  "version": "1.0.0",
+  "description": "AI API Proxy Bridge - Free access to Claude, GPT-4, Gemini via LMArena",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "build": "electron-builder",
+    "build:win": "electron-builder --win",
+    "build:mac": "electron-builder --mac",
+    "build:linux": "electron-builder --linux",
+    "postinstall": "electron-builder install-app-deps"
+  },
+  "keywords": [
+    "ai",
+    "proxy",
+    "api",
+    "claude",
+    "gpt4",
+    "gemini"
+  ],
+  "author": "Vogadero",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Vogadero/AIProxyBridge.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Vogadero/AIProxyBridge/issues"
+  },
+  "homepage": "https://github.com/Vogadero/AIProxyBridge#readme",
+  "devDependencies": {
+    "electron": "^28.3.3",
+    "electron-builder": "^24.9.1"
+  },
+  "dependencies": {
+    "axios": "^1.6.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "puppeteer-core": "^21.6.0",
+    "ws": "^8.14.2"
+  },
+  "build": {
+    "appId": "com.aiproxybridge.app",
+    "productName": "AI Proxy Bridge",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**/*",
+      "node_modules/**/*"
+    ],
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ],
+      "icon": "build/icon.ico"
+    },
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "icon": "build/icon.icns",
+      "category": "public.app-category.developer-tools"
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "icon": "build/icon.png",
+      "category": "Development"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true
+    }
+  }
+}
