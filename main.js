@@ -466,7 +466,9 @@ ipcMain.handle('refresh-models-ws', async () => {
 });
 
 // 窗口控制 IPC
-ipcMain.on('window-minimize', () => mainWindow?.minimize());
+ipcMain.on('window-minimize', () => {
+    if (mainWindow) mainWindow.hide(); // 最小化到系统托盘
+});
 ipcMain.on('window-maximize', () => {
     if (mainWindow?.isMaximized()) {
         mainWindow.unmaximize();
@@ -474,7 +476,9 @@ ipcMain.on('window-maximize', () => {
         mainWindow.maximize();
     }
 });
-ipcMain.on('window-close', () => mainWindow?.hide());
+ipcMain.on('window-close', () => {
+    if (mainWindow) mainWindow.hide(); // 关闭按钮也隐藏到托盘
+});
 
 // ========== 生命周期 ==========
 app.whenReady().then(() => {

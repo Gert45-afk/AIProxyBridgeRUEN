@@ -52,6 +52,9 @@
       "main.js",
       "preload.js",
       "renderer/**/*",
+      "src/**/*",
+      "scripts/bridge-userscript.js",
+      "build/**/*",
       "node_modules/**/*"
     ],
     "win": {
