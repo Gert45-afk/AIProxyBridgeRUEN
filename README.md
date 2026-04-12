@@ -9,6 +9,8 @@ Free access to top-tier AI models (Claude, GPT-4/5, Gemini, DeepSeek, Llama, etc
 
 ---
 
+![](images/01.png)
+
 ## Features | 特性
 
 - **OpenAI API Compatible** — Drop-in replacement for any client that supports OpenAI API format (streaming + non-streaming)
