@@ -1,34 +1,34 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('api', {
-    // 配置
+    // Configuration
     getConfig: () => ipcRenderer.invoke('get-config'),
     updateConfig: (config) => ipcRenderer.invoke('update-config', config),
 
-    // 服务控制
+    // Service control
     startServices: () => ipcRenderer.invoke('start-services'),
     stopServices: () => ipcRenderer.invoke('stop-services'),
 
-    // 模型管理
+    // Model management
     getModels: () => ipcRenderer.invoke('get-models'),
     refreshModels: () => ipcRenderer.invoke('refresh-models'),
     testModel: (model, message) => ipcRenderer.invoke('test-model', model, message),
 
-    // 浏览器实例
+    // Browser instances
     createBrowserInstance: () => ipcRenderer.invoke('create-browser-instance'),
     closeBrowserInstance: (instanceId) => ipcRenderer.invoke('close-browser-instance', instanceId),
     getInstances: () => ipcRenderer.invoke('get-instances'),
 
-    // WebSocket 客户端
+    // WebSocket clients
     getWsClients: () => ipcRenderer.invoke('get-ws-clients'),
     refreshModelsWs: () => ipcRenderer.invoke('refresh-models-ws'),
 
-    // 窗口控制
+    // Window controls
     minimizeWindow: () => ipcRenderer.send('window-minimize'),
     maximizeWindow: () => ipcRenderer.send('window-maximize'),
     closeWindow: () => ipcRenderer.send('window-close'),
 
-    // 事件监听
+    // Event listeners
     onServiceStatus: (callback) => {
         const handler = (e, data) => callback(data);
         ipcRenderer.on('service-status', handler);
@@ -36,14 +36,14 @@ contextBridge.exposeInMainWorld('api', {
     },
     onServiceError: (callback) => ipcRenderer.on('service-error', (e, err) => callback(err)),
 
-    // 浏览器列表更新
+    // Browser list updates
     onBrowserListUpdate: (callback) => {
         const handler = (e, data) => callback(data);
         ipcRenderer.on('browser-list-update', handler);
         return () => ipcRenderer.removeListener('browser-list-update', handler);
     },
 
-    // WebSocket 客户端列表更新
+    // WebSocket client list updates
     onWsClientListUpdate: (callback) => {
         const handler = (e, data) => callback(data);
         ipcRenderer.on('ws-client-list-update', handler);
@@ -55,21 +55,21 @@ contextBridge.exposeInMainWorld('api', {
         return () => ipcRenderer.removeListener('model-list-update', handler);
     },
 
-    // 窗口状态变化
+    // Window state changes
     onWindowStateChange: (callback) => {
         const handler = (e, data) => callback(data);
         ipcRenderer.on('window-state-change', handler);
         return () => ipcRenderer.removeListener('window-state-change', handler);
     },
 
-    // 导航指令
+    // Navigation commands
     onNavigateTab: (callback) => ipcRenderer.on('navigate-tab', (e, tabId) => callback(tabId)),
     onOpenHelp: (callback) => ipcRenderer.on('open-help', () => callback()),
 
-    // 日志
+    // Logs
     onLog: (callback) => ipcRenderer.on('log', (e, msg) => callback(msg)),
 
-    // 请求劫持状态（等待用户在浏览器中发消息）
+    // Request hijack status (waiting for the user to send a message in the browser)
     onHijackStatus: (callback) => {
         const handler = (e, data) => callback(data);
         ipcRenderer.on('hijack-status', handler);

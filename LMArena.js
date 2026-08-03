@@ -22,19 +22,19 @@
     let socket;
     const activeRequests = new Map();
 
-    // ========== 模型 UUID 映射 ==========
+    // ========== Model UUID mapping ==========
     let modelUuidMap = {};        // { "gpt-4o": "019a98f7-...", "chatgpt-4o-latest": "019a98f7-..." }
     let modelDisplayNameMap = {}; // { "GPT-4o": "019a98f7-..." }
     let uuidToSlugMap = {};       // { "019a98f7-...": "gpt-4o" }
-    let modelSlugList = [];       // 从 RSC 提取的 slug 列表
-    let initialModelAId = '';     // 默认模型的 UUID
+    let modelSlugList = [];       // slug list extracted from RSC
+    let initialModelAId = '';     // UUID of the default model
 
-    // ========== 捕获 lmarena.ai 的真实请求 ==========
+    // ========== Capture real requests from lmarena.ai ==========
     let capturedRequestTemplate = null;
     let capturedDirectTemplate = null;
     let capturedArenaTemplate = null;
 
-    // 请求劫持：当用户在浏览器中发送消息时，劫持页面的请求
+    // Request hijack: when the user sends a message in the browser, hijack the page's request
     let pendingHijack = null; // { requestId, modelAId, content, resolve }
 
     const originalFetch = window.fetch;
@@ -45,7 +45,7 @@
         else if (urlArg instanceof URL) { urlString = urlArg.href; }
         else if (typeof urlArg === 'string') { urlString = urlArg; }
 
-        // 诊断: 记录所有 API 相关的 fetch 调用
+        // Diagnostics: log all API-related fetch calls
         if (urlString) {
             const shortUrl = urlString.substring(0, 150);
             if (urlString.includes('evaluation') || urlString.includes('api') || urlString.includes('chat') || urlString.includes('stream')) {
@@ -77,12 +77,12 @@
 
                 if (body && body.recaptchaV3Token) window.recaptchaToken = body.recaptchaV3Token;
 
-                // 请求劫持：如果有待处理的劫持请求，修改请求体并拦截响应
+                // Request hijack: if a hijack is pending, modify the request body and intercept the response
                 if (pendingHijack && body && typeof body === 'object') {
                     const hijack = pendingHijack;
                     console.log(`[LMArena API] HIJACKING page request: modelAId=${body.modelAId} → ${hijack.modelAId}`);
 
-                    // 替换请求体中的关键字段
+                    // Replace key fields in the request body
                     body.modelAId = hijack.modelAId;
                     body.mode = 'direct';
                     if (body.userMessage) body.userMessage.content = hijack.content;
@@ -91,36 +91,36 @@
                     options.body = JSON.stringify(body);
                     args[1] = options;
 
-                    // 发送修改后的请求
+                    // Send the modified request
                     const hijackedResponse = await originalFetch.apply(this, args);
 
-                    // 如果 429（reCAPTCHA 拒绝），不清除 pendingHijack，允许用户手动重试
+                    // On 429 (reCAPTCHA rejection), don't clear pendingHijack — allow the user to retry manually
                     if (hijackedResponse.status === 429) {
                         console.warn('[LMArena API] Hijacked request got 429 — reCAPTCHA rejected auto-submit');
-                        // 保持 pendingHijack 不变，等用户手动按 Enter
-                        // 但标记已尝试自动提交，避免重复模拟 Enter
+                        // Keep pendingHijack unchanged, wait for the user to press Enter manually
+                        // But mark that auto-submit was attempted, to avoid simulating Enter twice
                         hijack.autoSubmitted = true;
 
-                        // 通知应用：自动提交失败，需手动操作
+                        // Notify the app: auto-submit failed, manual action required
                         if (socket && socket.readyState === WebSocket.OPEN) {
                             socket.send(JSON.stringify({
                                 type: 'status',
                                 data: {
                                     status: 'auto_submit_429',
                                     requestId: hijack.requestId,
-                                    message: '自动提交被 reCAPTCHA 拒绝，请在浏览器中手动按 Enter 发送消息'
+                                    message: 'Auto-submit was rejected by reCAPTCHA — press Enter manually in the browser to send the message'
                                 }
                             }));
                         }
 
-                        // 返回空 200 给页面（避免页面显示错误或自动重试）
+                        // Return an empty 200 to the page (avoid page errors or auto-retries)
                         return new Response('', { status: 200, headers: { 'Content-Type': 'text/plain' } });
                     }
 
-                    // 非 429：成功劫持，清除 pendingHijack
+                    // Non-429: hijack succeeded, clear pendingHijack
                     pendingHijack = null;
 
-                    // 异步读取流并转发给代理
+                    // Read the stream asynchronously and forward it to the proxy
                     (async () => {
                         try {
                             await handleStreamResponse(hijackedResponse, hijack.requestId);
@@ -132,17 +132,17 @@
                         }
                     })();
 
-                    // 返回空响应给页面（避免页面报错）
+                    // Return an empty response to the page (avoid page errors)
                     return new Response('', { status: 200, headers: { 'Content-Type': 'text/plain' } });
                 }
 
-                // 从捕获的请求中提取 modelAId → 建立 UUID 映射
+                // Extract modelAId from the captured request → build the UUID mapping
                 if (body && body.modelAId && /^[0-9a-f]{8}-/i.test(body.modelAId)) {
                     console.log(`[LMArena API] Captured modelAId UUID: ${body.modelAId}, mode: ${body.mode || 'unknown'}`);
-                    // 把捕获的 UUID 记录下来，后续可用
+                    // Record the captured UUID for later use
                     addModelMapping('captured-modelAId', body.modelAId, 'Captured Model');
 
-                    // 如果用户在 Direct Chat 页面选择了模型，尝试从页面获取模型名
+                    // If the user selected a model on the Direct Chat page, try to get the model name from the page
                     tryCaptureModelSelection(body.modelAId);
                 }
 
@@ -181,7 +181,7 @@
             } catch (e) {}
         }
 
-        // 捕获 Next-Action IDs（图片上传用）
+        // Capture Next-Action IDs (used for image uploads)
         if (urlString && urlString.includes('?mode=direct') && args[1] && args[1].method === 'POST') {
             try {
                 const headers = args[1].headers || {};
@@ -201,7 +201,7 @@
         return originalFetch.apply(this, args);
     };
 
-    // ========== 添加模型映射 ==========
+    // ========== Add model mapping ==========
     function addModelMapping(slug, uuid, displayName) {
         if (!slug || !uuid) return;
         modelUuidMap[slug] = uuid;
@@ -214,10 +214,10 @@
         uuidToSlugMap[uuid.toLowerCase()] = slug;
     }
 
-    // ========== 尝试从页面捕获当前选中的模型 ==========
+    // ========== Try to capture the currently selected model from the page ==========
     function tryCaptureModelSelection(modelAId) {
         try {
-            // 方法1: 从 cmdk 下拉菜单中找
+            // Method 1: look in the cmdk dropdown menu
             const selectedOption = document.querySelector('div[cmdk-item][role="option"][aria-selected="true"]');
             if (selectedOption) {
                 const nameSpan = selectedOption.querySelector('span.flex-1.truncate');
@@ -233,7 +233,7 @@
                 }
             }
 
-            // 方法2: 从 combobox 按钮文本中找
+            // Method 2: look in the combobox button text
             const comboBtn = document.querySelector('button[role="combobox"]');
             if (comboBtn) {
                 const btnText = comboBtn.textContent.trim();
@@ -247,9 +247,9 @@
         } catch (e) {}
     }
 
-    // ========== UUIDv7 生成 ==========
-    // lmarena.ai 服务器校验 UUIDv7 时间戳，偏移太大会被拒绝
-    // 必须用 BigInt 避免精度丢失（JS 位运算只支持 32 位）
+    // ========== UUIDv7 generation ==========
+    // The lmarena.ai server validates the UUIDv7 timestamp — too much skew gets rejected
+    // Must use BigInt to avoid precision loss (JS bitwise ops only support 32 bits)
     function uuid7() {
         const ts = BigInt(Date.now());
         const randA = BigInt(Math.floor(Math.random() * 0x1000));
@@ -260,7 +260,7 @@
         return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20)}`;
     }
 
-    // 兼容旧的 generateUUID
+    // Compatible with the old generateUUID
     function generateUUID() {
         if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
             return crypto.randomUUID();
@@ -268,13 +268,13 @@
         return uuid7();
     }
 
-    // ========== 从页面 HTML 中提取模型 slug（最可靠的兜底方法） ==========
+    // ========== Extract model slugs from the page HTML (most reliable fallback) ==========
     function extractModelsFromPageHTML() {
         const models = [];
         const seen = new Set();
         try {
             const html = document.documentElement.outerHTML;
-            // 与 browser-manager.js parseModelsFromHTML() 相同的正则
+            // Same regex as browser-manager.js parseModelsFromHTML()
             const modelPattern = /(?:"|'|`)(claude-[a-z0-9._\-]+|gpt-[a-z0-9._\-]+|chatgpt-[a-z0-9._\-]+|o[134]-[a-z0-9._\-]+|gemini-[a-z0-9._\-]+|llama-[a-z0-9._\-]+|deepseek-[a-z0-9._\-]+|qwen[a-z0-9._\-]{3,60}|mistral-[a-z0-9._\-]+|grok-[a-z0-9._\-]+|glm-[a-z0-9._\-]+|ernie-[a-z0-9._\-]+|kimi-[a-z0-9._\-]+|gemma-[a-z0-9._\-]+|phi-[a-z0-9._\-]+|codestral[a-z0-9._\-]*|mixtral[a-z0-9._\-]*|pixtral[a-z0-9._\-]*|ministral[a-z0-9._\-]*|c4ai-[a-z0-9._\-]+|command-[a-z0-9._\-]+|dbrx[a-z0-9._\-]*|yi-[a-z0-9._\-]+|dall-e-[a-z0-9._\-]+)(?:"|'|`)/gi;
             let match;
             while ((match = modelPattern.exec(html)) !== null) {
@@ -292,38 +292,38 @@
         return models;
     }
 
-    // ========== 从 RSC 飞行数据提取模型列表 ==========
-    // lmarena.ai 是 Next.js 应用，模型数据嵌入在 self.__next_f.push() 中
+    // ========== Extract the model list from RSC flight data ==========
+    // lmarena.ai is a Next.js app — model data is embedded in self.__next_f.push()
     function extractModelsFromRSC() {
         let models = [];
         let modelAId = '';
         let allModelData = {};
 
         try {
-            // 方法1: 解析 <script> 标签中的 __next_f.push 数据
+            // Method 1: parse the __next_f.push data in <script> tags
             const scripts = document.querySelectorAll('script');
             for (const script of scripts) {
                 const content = script.textContent || '';
                 if (!content.includes('initialModels')) continue;
 
-                // 提取 initialModels 数据
-                // RSC 格式: self.__next_f.push([1,"...initialModels:[...]..."])
-                // 或直接在 HTML 中: \"initialModels\":[...]
+                // Extract the initialModels data
+                // RSC format: self.__next_f.push([1,"...initialModels:[...]..."])
+                // Or directly in the HTML: \"initialModels\":[...]
 
-                // 尝试解析转义的 JSON
+                // Try to parse the escaped JSON
                 try {
-                    // 查找 initialModels 附近的数据
+                    // Find the data near initialModels
                     const idx = content.indexOf('initialModels');
                     if (idx === -1) continue;
 
-                    // 从 initialModels 开始提取
+                    // Start extracting from initialModels
                     const afterKey = content.substring(idx + 'initialModels'.length);
 
-                    // 查找数组开始
+                    // Find the start of the array
                     const arrStart = afterKey.indexOf('[');
                     if (arrStart === -1 || arrStart > 10) continue;
 
-                    // 手动匹配括号找到数组结束
+                    // Manually match brackets to find the end of the array
                     let depth = 0;
                     let arrEnd = -1;
                     for (let i = arrStart; i < afterKey.length; i++) {
@@ -338,19 +338,19 @@
 
                     let arrStr = afterKey.substring(arrStart, arrEnd);
 
-                    // 处理转义
+                    // Handle escaping
                     if (arrStr.includes('\\"')) {
                         arrStr = arrStr.replace(/\\"/g, '"').replace(/\\\\/g, '\\');
                     }
 
                     const parsed = JSON.parse(arrStr);
                     if (Array.isArray(parsed) && parsed.length > 0) {
-                        // 检查是字符串数组还是对象数组
+                        // Check whether it's an array of strings or of objects
                         if (typeof parsed[0] === 'string') {
                             models = parsed;
                             console.log(`[LMArena API] RSC: Found ${models.length} model slugs`);
                         } else if (typeof parsed[0] === 'object') {
-                            // 对象数组，可能包含 UUID
+                            // Array of objects, which may contain UUIDs
                             for (const m of parsed) {
                                 if (m && m.id) {
                                     const uuid = m.id;
@@ -366,13 +366,13 @@
                         }
                     }
                 } catch (e) {
-                    // 解析失败，尝试正则提取
+                    // Parsing failed — try regex extraction
                     try {
                         const slugMatches = content.matchAll(/"([a-z][a-z0-9_-]{5,50})"/g);
                         const slugList = [];
                         for (const m of slugMatches) {
                             const slug = m[1];
-                            // 过滤看起来像模型 slug 的字符串
+                            // Filter out strings that look like model slugs
                             if (/(?:gpt|claude|gemini|llama|deepseek|qwen|mistral|mixtral|grok|command|codestral|pixtral|ministral|dall-e|o[1-4]|c4ai)/.test(slug)) {
                                 if (!slugList.includes(slug)) slugList.push(slug);
                             }
@@ -384,7 +384,7 @@
                     } catch (e2) {}
                 }
 
-                // 提取 initialModelAId
+                // Extract initialModelAId
                 try {
                     const aidMatch = content.match(/initialModelAId[^"]*"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"/i);
                     if (aidMatch) {
@@ -393,7 +393,7 @@
                     }
                 } catch (e) {}
 
-                // 提取其他模型数据字段
+                // Extract other model data fields
                 try {
                     const dataPatterns = [
                         /"text_models"\s*:\s*(\[[\s\S]*?\])/,
@@ -420,7 +420,7 @@
                 } catch (e) {}
             }
 
-            // 方法2: 直接读取 window 上的 Next.js 数据
+            // Method 2: read the Next.js data directly from window
             if (models.length === 0 && window.__NEXT_DATA__) {
                 try {
                     const nextDataStr = JSON.stringify(window.__NEXT_DATA__);
@@ -439,12 +439,12 @@
         return { models, modelAId };
     }
 
-    // ========== 通过点击下拉菜单提取模型 ==========
+    // ========== Extract models by clicking the dropdown menu ==========
     async function extractModelsViaDropdown() {
         const extracted = [];
 
         try {
-            // 查找模型选择器按钮（cmdk combobox）
+            // Find the model selector button (cmdk combobox)
             const modelBtn = document.querySelector('button[role="combobox"][aria-haspopup="dialog"]');
             if (!modelBtn) {
                 console.log('[LMArena API] Dropdown: Model selector button not found (may not be on Direct Chat page)');
@@ -453,11 +453,11 @@
 
             console.log('[LMArena API] Dropdown: Found model selector, opening...');
 
-            // 模拟真实点击
+            // Simulate a real click
             modelBtn.focus();
             await new Promise(r => setTimeout(r, 100));
 
-            // 发送 pointer 事件（更真实）
+            // Send pointer events (more realistic)
             const rect = modelBtn.getBoundingClientRect();
             const clickX = rect.left + rect.width / 2;
             const clickY = rect.top + rect.height / 2;
@@ -474,21 +474,21 @@
             }));
             modelBtn.click();
 
-            // 等待下拉菜单加载
+            // Wait for the dropdown menu to load
             await new Promise(r => setTimeout(r, 1200));
 
-            // 读取所有模型选项
+            // Read all model options
             const options = document.querySelectorAll('div[cmdk-item][role="option"]');
             console.log(`[LMArena API] Dropdown: Found ${options.length} model options`);
 
             for (const opt of options) {
-                if (opt.offsetParent === null) continue; // 跳过隐藏项
+                if (opt.offsetParent === null) continue; // skip hidden items
 
-                // 模型名称
+                // Model name
                 const nameSpan = opt.querySelector('span.flex-1.truncate');
                 const name = nameSpan ? nameSpan.textContent.trim() : (opt.textContent || '').trim();
 
-                // cmdk-item 的 value 属性可能包含 UUID
+                // The cmdk-item's value attribute may contain a UUID
                 const dataValue = opt.getAttribute('data-value') || opt.getAttribute('value') || '';
                 const cmdkValue = opt.getAttribute('cmdk-item') || '';
 
@@ -502,7 +502,7 @@
                         cmdkValue: cmdkValue
                     });
 
-                    // 如果 dataValue 看起来像 UUID，建立映射
+                    // If dataValue looks like a UUID, create the mapping
                     if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(dataValue)) {
                         addModelMapping(slug, dataValue, name);
                         addModelMapping(name, dataValue, name);
@@ -511,7 +511,7 @@
                 }
             }
 
-            // 关闭下拉菜单
+            // Close the dropdown menu
             document.dispatchEvent(new KeyboardEvent('keydown', {
                 key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true, cancelable: true
             }));
@@ -524,16 +524,16 @@
         return extracted;
     }
 
-    // ========== 综合提取模型数据 ==========
+    // ========== Combined model data extraction ==========
     async function extractAllModelData() {
-        // 第1步: 从 RSC 飞行数据提取
+        // Step 1: extract from RSC flight data
         const rscData = extractModelsFromRSC();
         modelSlugList = rscData.models;
         initialModelAId = rscData.modelAId;
 
         console.log(`[LMArena API] RSC extraction: ${modelSlugList.length} slugs, initialModelAId: ${initialModelAId || 'none'}`);
 
-        // 第2步: 如果 RSC 提取失败，从页面 HTML 中扫描模型 slug
+        // Step 2: if RSC extraction fails, scan model slugs from the page HTML
         if (modelSlugList.length === 0) {
             const htmlSlugs = extractModelsFromPageHTML();
             if (htmlSlugs.length > 0) {
@@ -542,12 +542,12 @@
             }
         }
 
-        // 第3步: 尝试点击下拉菜单提取
+        // Step 3: try extracting by clicking the dropdown menu
         const dropdownModels = await extractModelsViaDropdown();
         if (dropdownModels.length > 0) {
             console.log(`[LMArena API] Dropdown: Extracted ${dropdownModels.length} models`);
 
-            // 合并下拉菜单的模型到列表
+            // Merge the dropdown models into the list
             for (const dm of dropdownModels) {
                 if (!modelSlugList.includes(dm.slug)) {
                     modelSlugList.push(dm.slug);
@@ -555,12 +555,12 @@
             }
         }
 
-        // 如果有 initialModelAId，把它关联到第一个模型（默认选中）
+        // If there is an initialModelAId, associate it with the first model (selected by default)
         if (initialModelAId && modelSlugList.length > 0) {
             addModelMapping(modelSlugList[0], initialModelAId, modelSlugList[0]);
         }
 
-        // 第4步: 构建完整的模型列表
+        // Step 4: build the complete model list
         const modelList = [];
         const seenUuids = new Set();
         const seenSlugs = new Set();
@@ -573,7 +573,7 @@
             const displayName = uuidToSlugMap[uuid] || slug;
 
             modelList.push({
-                id: uuid || slug,           // 优先 UUID，没有则用 slug
+                id: uuid || slug,           // prefer the UUID, use the slug if none
                 name: displayName,
                 slug: slug
             });
@@ -621,48 +621,48 @@
         }
     }
 
-    // ========== 解析 modelAId ==========
+    // ========== Resolve modelAId ==========
     function resolveModelAId(model) {
         if (!model) return initialModelAId || '';
 
-        // 1. 精确匹配 slug→UUID
+        // 1. Exact match slug → UUID
         if (modelUuidMap[model]) return modelUuidMap[model];
         if (modelUuidMap[model.toLowerCase()]) return modelUuidMap[model.toLowerCase()];
 
-        // 2. 显示名→UUID
+        // 2. Display name → UUID
         if (modelDisplayNameMap[model]) return modelDisplayNameMap[model];
         if (modelDisplayNameMap[model.toLowerCase()]) return modelDisplayNameMap[model.toLowerCase()];
 
-        // 3. 模糊匹配
+        // 3. Fuzzy match
         const normalized = model.toLowerCase().replace(/[-_.\s]/g, '');
         for (const [key, uuid] of Object.entries(modelUuidMap)) {
             if (key.toLowerCase().replace(/[-_.\s]/g, '') === normalized) return uuid;
         }
 
-        // 4. 如果已经是 UUID 格式，直接返回
+        // 4. If it's already in UUID format, return it as-is
         if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(model)) {
             return model;
         }
 
-        // 5. 无法解析 — 回退到 initialModelAId 或原始值
+        // 5. Cannot resolve — fall back to initialModelAId or the raw value
         if (initialModelAId) {
             console.warn(`[LMArena API] Cannot resolve "${model}", falling back to initialModelAId: ${initialModelAId}`);
             return initialModelAId;
         }
 
         console.warn(`[LMArena API] Cannot resolve modelAId for "${model}". No UUID mapping available.`);
-        return model;  // 回退（大概率会 500）
+        return model;  // fallback (will likely 500)
     }
 
-    // ========== 构建 Direct 模式请求体 ==========
-    // 参考 gpt4free: https://github.com/xtekky/gpt4free/issues/2832
-    // id 使用 UUIDv7, mode 包含 "direct", modelAId 为模型 UUID
+    // ========== Build the Direct-mode request body ==========
+    // Reference gpt4free: https://github.com/xtekky/gpt4free/issues/2832
+    // id uses UUIDv7, mode contains "direct", modelAId is the model UUID
     function buildDirectModeBody(modelId, content, serverModelAId) {
         const resolvedModelAId = serverModelAId ? resolveModelAId(serverModelAId) : resolveModelAId(modelId);
 
         return {
-            id: uuid7(),             // UUIDv7 — 服务器会验证格式
-            mode: 'direct',          // gpt4free 确认需要此字段
+            id: uuid7(),             // UUIDv7 — the server validates the format
+            mode: 'direct',          // gpt4free confirms this field is required
             modelAId: resolvedModelAId,
             userMessageId: uuid7(),
             modelAMessageId: uuid7(),
@@ -676,9 +676,9 @@
         };
     }
 
-    // ========== DOM 操作：填入消息到输入框（不点击发送） ==========
-    // 不触发发送按钮，避免 Cloudflare Turnstile 检测
-    // 用户只需按 Enter 键即可发送（这是真实用户交互，reCAPTCHA token 有效）
+    // ========== DOM operations: fill the message into the input box (without clicking send) ==========
+    // Don't trigger the send button — avoids Cloudflare Turnstile detection
+    // The user just presses Enter to send (this is real user interaction, the reCAPTCHA token stays valid)
 
     function findChatInput() {
         const selectors = [
@@ -699,16 +699,16 @@
     function setReactInputValue(element, value) {
         element.focus();
 
-        // 方法1: execCommand — 最可靠，走浏览器原生输入管道，React 能正确捕获
+        // Method 1: execCommand — most reliable, uses the browser's native input pipeline, captured correctly by React
         try {
-            element.select(); // 选中现有文本
+            element.select(); // select the existing text
             if (document.execCommand('insertText', false, value)) {
-                console.log('[LMArena API] setReactInputValue: execCommand 成功');
+                console.log('[LMArena API] setReactInputValue: execCommand succeeded');
                 return;
             }
         } catch (e) {}
 
-        // 方法2: native setter + InputEvent（React 18 兼容）
+        // Method 2: native setter + InputEvent (React 18 compatible)
         const nativeSetter = Object.getOwnPropertyDescriptor(
             element.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype,
             'value'
@@ -718,7 +718,7 @@
         } else {
             element.value = value;
         }
-        // 使用 InputEvent 而非 Event，React 18 对 InputEvent 的处理更可靠
+        // Use InputEvent instead of Event — React 18 handles InputEvent more reliably
         element.dispatchEvent(new InputEvent('input', {
             bubbles: true,
             inputType: 'insertText',
@@ -728,33 +728,33 @@
         console.log('[LMArena API] setReactInputValue: native setter + InputEvent');
     }
 
-    // 模拟 Enter 键发送消息
+    // Simulate the Enter key to send the message
     function simulateEnterKey(element) {
         if (!element) element = findChatInput();
         if (!element) return false;
         element.focus();
-        // 模拟完整的键盘事件链
+        // Simulate the full keyboard event chain
         element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
         element.dispatchEvent(new KeyboardEvent('keypress', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
         element.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
-        console.log('[LMArena API] 已模拟 Enter 键');
+        console.log('[LMArena API] Enter key simulated');
         return true;
     }
 
-    // 填入消息到页面输入框，返回是否成功
+    // Fill the message into the page input box, returns success
     function fillChatInput(content) {
         const input = findChatInput();
         if (!input) {
-            console.warn('[LMArena API] 未找到输入框，无法自动填入消息');
+            console.warn('[LMArena API] Input box not found — could not auto-fill the message');
             return false;
         }
         setReactInputValue(input, content);
-        console.log('[LMArena API] 消息已填入输入框，将自动尝试提交');
+        console.log('[LMArena API] Message filled into the input box — will try to auto-submit');
         return true;
     }
 
-    // ========== MutationObserver: 监听页面 DOM 捕获 AI 响应 ==========
-    // 当 fetch 拦截无法捕获请求时，通过监听 DOM 变化获取 AI 回复
+    // ========== MutationObserver: watch page DOM to capture the AI response ==========
+    // When fetch interception can't capture the request, get the AI reply by watching DOM changes
     let domObserver = null;
     let domObserverRequestId = null;
     let lastAssistantText = '';
@@ -766,29 +766,29 @@
         lastAssistantText = '';
         domResponseComplete = false;
 
-        // 查找聊天消息容器
+        // Find the chat message container
         const chatContainer = findChatContainer();
         if (!chatContainer) {
-            console.warn('[LMArena API] DOM Observer: 未找到聊天容器');
+            console.warn('[LMArena API] DOM Observer: chat container not found');
             return;
         }
 
-        // 记录当前已有的助手消息数量（避免捕获旧消息）
+        // Record the current number of assistant messages (avoid capturing old messages)
         const existingAssistantMsgs = chatContainer.querySelectorAll(
             '[class*="assistant"], [data-message-role="assistant"]'
         );
         const existingCount = existingAssistantMsgs.length;
-        console.log(`[LMArena API] DOM Observer 启动: ${existingCount} 条历史消息`);
+        console.log(`[LMArena API] DOM Observer started: ${existingCount} existing messages`);
 
         domObserver = new MutationObserver(() => {
             try {
                 const text = getLatestAssistantText(chatContainer, existingCount);
                 if (text && text.length > lastAssistantText.length) {
-                    // 只发送增量内容
+                    // Only send the incremental content
                     const delta = text.substring(lastAssistantText.length);
                     lastAssistantText = text;
                     sendToServer(requestId, delta);
-                    console.log(`[LMArena API] DOM Observer: +${delta.length} 字符 (总计 ${text.length})`);
+                    console.log(`[LMArena API] DOM Observer: +${delta.length} chars (total ${text.length})`);
                 }
             } catch (e) {}
         });
@@ -799,7 +799,7 @@
             characterData: true
         });
 
-        // 设置超时检查：5秒后如果还没有内容，检查页面是否有错误
+        // Set a timeout check: if there's still no content after 5 seconds, check the page for errors
         setTimeout(() => {
             if (domObserver && !lastAssistantText && domObserverRequestId === requestId) {
                 const errorText = checkPageError();
@@ -810,7 +810,7 @@
             }
         }, 5000);
 
-        // 60秒后自动停止（响应应该已经完成）
+        // Auto-stop after 60 seconds (the response should be complete by then)
         setTimeout(() => {
             if (domObserverRequestId === requestId) {
                 if (lastAssistantText) {
@@ -830,9 +830,9 @@
     }
 
     function findChatContainer() {
-        // lmarena.ai 使用 Next.js，聊天消息通常在特定容器中
+        // lmarena.ai uses Next.js — chat messages are usually in specific containers
         const selectors = [
-            '[class*="chat"] [class*="message"]',  // 通用聊天容器
+            '[class*="chat"] [class*="message"]',  // generic chat container
             '[class*="conversation"]',
             '[class*="thread"]',
             '[role="log"]',
@@ -847,7 +847,7 @@
     }
 
     function getLatestAssistantText(container, skipCount) {
-        // 策略1: 查找 class 含 "assistant" 的元素
+        // Strategy 1: find elements whose class contains "assistant"
         const assistantSelectors = [
             '[class*="assistant"] [class*="markdown"]',
             '[class*="assistant"] [class*="prose"]',
@@ -861,26 +861,26 @@
         for (const sel of assistantSelectors) {
             const els = container.querySelectorAll(sel);
             if (els.length > skipCount) {
-                // 取最后一个（最新的响应）
+                // Take the last one (the newest response)
                 const last = els[els.length - 1];
                 const text = (last.innerText || last.textContent || '').trim();
                 if (text.length > 2) return text;
             }
         }
 
-        // 策略2: 查找所有消息块，取最后一个非用户消息
+        // Strategy 2: find all message blocks and take the last non-user message
         const msgSelectors = '[class*="message"], [class*="turn"], [class*="bubble"]';
         const msgs = container.querySelectorAll(msgSelectors);
         if (msgs.length > 0) {
             const last = msgs[msgs.length - 1];
             const text = (last.innerText || last.textContent || '').trim();
-            // 排除用户消息（通常较短且在前面）
+            // Exclude user messages (usually shorter and earlier)
             if (text.length > 5 && !last.querySelector('textarea') && !last.querySelector('input')) {
                 return text;
             }
         }
 
-        // 策略3: 查找 markdown/prose 内容（AI 响应通常使用 markdown 渲染）
+        // Strategy 3: look for markdown/prose content (AI responses are usually rendered as markdown)
         const markdownEls = container.querySelectorAll('.markdown, .prose, [class*="markdown"], [class*="prose"]');
         if (markdownEls.length > 0) {
             const last = markdownEls[markdownEls.length - 1];
@@ -900,8 +900,8 @@
         return null;
     }
 
-    // ========== Fetch 诊断日志 ==========
-    let fetchLog = [];  // 记录最近的 fetch 调用 URL
+    // ========== Fetch diagnostics log ==========
+    let fetchLog = [];  // records recent fetch call URLs
 
     function sendDiagnostics(label) {
         if (socket && socket.readyState === WebSocket.OPEN) {
@@ -967,22 +967,22 @@
                 (async () => {
                     try {
                         const model = data.model || '';
-                        const content = data.content || '你好';
+                        const content = data.content || 'Hello';
                         const modelAId = (buildDirectModeBody(model, content, data.modelAId)).modelAId;
 
-                        // ====== 双重策略: fetch 劫持 + DOM 监听 ======
-                        // 策略1: 请求劫持 — 拦截页面 fetch，替换模型 ID（需要 fetch 拦截器生效）
-                        // 策略2: DOM 监听 — MutationObserver 捕获页面 AI 回复（始终可用，但无法替换模型）
+                        // ====== Dual strategy: fetch hijack + DOM watching ======
+                        // Strategy 1: request hijack — intercept the page's fetch and replace the model ID (requires the fetch interceptor to work)
+                        // Strategy 2: DOM watching — a MutationObserver captures the page's AI reply (always available, but cannot replace the model)
 
                         console.log(`[LMArena API] Setting up hijack + DOM observer: modelAId=${modelAId}`);
 
-                        // 发送诊断信息
+                        // Send diagnostics
                         sendDiagnostics('test_start');
 
-                        // 填入消息到页面的输入框
+                        // Fill the message into the page's input box
                         const inputFilled = fillChatInput(content);
 
-                        // 设置劫持
+                        // Set up the hijack
                         let hijackResolve;
                         const hijackPromise = new Promise(resolve => { hijackResolve = resolve; });
                         pendingHijack = {
@@ -993,10 +993,10 @@
                             autoSubmitted: false
                         };
 
-                        // 同时启动 DOM 监听（作为备用方案）
+                        // Also start DOM watching (as a fallback)
                         startDOMObserver(request_id);
 
-                        // 通知代理
+                        // Notify the proxy
                         if (socket && socket.readyState === WebSocket.OPEN) {
                             socket.send(JSON.stringify({
                                 type: 'status',
@@ -1004,13 +1004,13 @@
                                     status: 'waiting_for_trigger',
                                     requestId: request_id,
                                     message: inputFilled
-                                        ? '消息已填入浏览器输入框，将自动提交并监听响应'
-                                        : '请在 lmarena.ai 发送一条消息来触发测试'
+                                        ? 'Message filled into the browser input box — will auto-submit and listen for the response'
+                                        : 'Please send a message on lmarena.ai to trigger the test'
                                 }
                             }));
                         }
 
-                        // 延迟 800ms 后自动模拟 Enter 键提交
+                        // Auto-simulate the Enter key after an 800ms delay to submit
                         setTimeout(() => {
                             if (pendingHijack && pendingHijack.requestId === request_id) {
                                 simulateEnterKey(findChatInput());
@@ -1018,50 +1018,50 @@
                             }
                         }, 800);
 
-                        // 等待结果：fetch 劫持 或 DOM 监听
-                        // fetch 劫持成功时 pendingHijack = null；DOM 监听成功时 lastAssistantText 非空
+                        // Wait for a result: fetch hijack or DOM watching
+                        // fetch hijack success sets pendingHijack = null; DOM watching success makes lastAssistantText non-empty
                         const startTime = Date.now();
 
-                        // 轮询检查两种策略的结果
+                        // Poll for results from both strategies
                         while (Date.now() - startTime < 120000) {
                             await new Promise(r => setTimeout(r, 500));
 
-                            // 请求被取消
+                            // Request was cancelled
                             if (!activeRequests.has(request_id)) {
                                 pendingHijack = null;
                                 stopDOMObserver();
                                 return;
                             }
 
-                            // fetch 劫持成功：pendingHijack 已被清除
+                            // fetch hijack succeeded: pendingHijack has been cleared
                             if (!pendingHijack) {
                                 stopDOMObserver();
-                                console.log(`[LMArena API] Fetch 劫持成功`);
-                                return; // 响应已由 handleStreamResponse 处理
+                                console.log(`[LMArena API] Fetch hijack succeeded`);
+                                return; // the response is handled by handleStreamResponse
                             }
 
-                            // DOM 监听成功：捕获到 AI 响应
+                            // DOM watching succeeded: AI response captured
                             if (lastAssistantText && domObserverRequestId === request_id) {
-                                // 发送 [DONE] 标记
+                                // Send the [DONE] marker
                                 sendToServer(request_id, '[DONE]');
                                 pendingHijack = null;
                                 stopDOMObserver();
-                                console.log(`[LMArena API] DOM Observer 捕获到响应: ${lastAssistantText.length} 字符`);
+                                console.log(`[LMArena API] DOM Observer captured a response: ${lastAssistantText.length} chars`);
                                 return;
                             }
                         }
 
-                        // 两种策略都超时
+                        // Both strategies timed out
                         pendingHijack = null;
                         stopDOMObserver();
                         sendDiagnostics('timeout');
                         throw new Error(
-                            '请求超时 — 两种策略均未捕获到响应\n' +
-                            '可能原因:\n' +
-                            '1. 页面未发送请求（请确认输入框有内容且按了 Enter）\n' +
-                            '2. 页面触发了人机验证（请完成验证后重试）\n' +
-                            '3. fetch 拦截器未生效（请刷新页面重试）\n' +
-                            '提示: 在浏览器中手动发送一条消息，观察是否正常响应。'
+                            'Request timed out — neither strategy captured a response\n' +
+                            'Possible causes:\n' +
+                            '1. The page did not send a request (make sure the input box has content and Enter was pressed)\n' +
+                            '2. The page triggered a CAPTCHA check (complete it and try again)\n' +
+                            '3. The fetch interceptor did not work (refresh the page and try again)\n' +
+                            'Tip: send a message manually in the browser and check whether it responds normally.'
                         );
 
                     } catch (error) {
@@ -1096,7 +1096,7 @@
     async function handleStreamResponse(response, requestId) {
         if (!response.body) {
             const text = await response.text();
-            // 尝试从非流式响应中提取文本
+            // Try to extract text from a non-streamed response
             const extracted = extractTextFromRSC(text);
             if (extracted) {
                 sendToServer(requestId, extracted);
@@ -1109,12 +1109,12 @@
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let totalChunks = 0;
-        let buffer = ''; // 缓冲区，用于拼接不完整的行
+        let buffer = ''; // buffer for joining incomplete lines
 
         while (true) {
             const { value, done } = await reader.read();
             if (done) {
-                // 处理缓冲区中剩余的数据
+                // Process the remaining data in the buffer
                 if (buffer.trim()) {
                     const text = extractTextFromRSCLine(buffer);
                     if (text) sendToServer(requestId, text);
@@ -1126,9 +1126,9 @@
             totalChunks++;
             buffer += decoder.decode(value, { stream: true });
 
-            // 按行分割并处理完整的行
+            // Split by line and process complete lines
             const lines = buffer.split('\n');
-            // 最后一个元素可能是不完整的行，保留在缓冲区
+            // The last element may be an incomplete line — keep it in the buffer
             buffer = lines.pop() || '';
 
             for (const line of lines) {
@@ -1139,8 +1139,8 @@
         }
     }
 
-    // 从 RSC 流式行中提取文本内容
-    // 格式: 0:"text" 或其他 type:value 格式
+    // Extract text content from an RSC stream line
+    // Format: 0:"text" or another type:value format
     function extractTextFromRSCLine(line) {
         try {
             const colonIdx = line.indexOf(':');
@@ -1155,7 +1155,7 @@
         return null;
     }
 
-    // 从完整的 RSC 响应中提取所有文本
+    // Extract all text from a complete RSC response
     function extractTextFromRSC(rawData) {
         let text = '';
         const lines = rawData.split('\n');
@@ -1181,7 +1181,7 @@
         } catch (e) {}
     }
 
-    // ========== 图片上传 ==========
+    // ========== Image upload ==========
     async function handleImageUpload(message) {
         const { id, data, mime } = message;
         try {
@@ -1222,7 +1222,7 @@
         return { name: key, contentType: mimeType, url: step3Json.data.url };
     }
 
-    // ========== 自动提取 Next-Action IDs ==========
+    // ========== Automatically extract Next-Action IDs ==========
     function extractActionIDsFromPageSource(attempt = 1) {
         try {
             const scripts = document.querySelectorAll('script');
@@ -1251,7 +1251,7 @@
         } catch (e) {}
     }
 
-    // ========== 初始化 ==========
+    // ========== Initialization ==========
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', () => {
             extractActionIDsFromPageSource(1);
@@ -1262,7 +1262,7 @@
         sendModelDataToServer();
     }
 
-    // 延迟提取（等待动态加载完成）
+    // Delayed extraction (wait for dynamic loading to finish)
     setTimeout(() => { sendModelDataToServer(); }, 3000);
     setTimeout(() => { sendModelDataToServer(); }, 8000);
     setTimeout(() => { sendModelDataToServer(); }, 15000);

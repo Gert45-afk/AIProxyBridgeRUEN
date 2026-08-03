@@ -19,13 +19,13 @@ class BrowserManager {
         const chromePath = await this.findChromePath();
         if (!chromePath) {
             throw new Error(
-                '找不到 Chrome/Edge 浏览器！\n' +
-                '请安装 Google Chrome 或 Microsoft Edge，或者配置浏览器路径。'
+                'Chrome/Edge browser not found!\n' +
+                'Please install Google Chrome or Microsoft Edge, or configure the browser path.'
             );
         }
         this.cachedChromePath = chromePath;
         console.log(`[BrowserManager] Using browser: ${chromePath}`);
-        console.log('[BrowserManager] 初始化完成，等待创建浏览器实例...');
+        console.log('[BrowserManager] Initialization complete, waiting to create browser instances...');
         setInterval(() => this.updateModels(), 3600000);
     }
 
@@ -103,11 +103,11 @@ class BrowserManager {
         return null;
     }
 
-    // ========== 核心：通过 UI 操控页面发送消息并获取响应 ==========
+    // ========== Core: send messages and get responses by driving the page UI ==========
 
     async handleChatCompletion(requestId, model, messages, onChunk) {
         if (this.pages.length === 0) {
-            onChunk({ error: '没有可用的浏览器实例' });
+            onChunk({ error: 'No browser instances available' });
             return;
         }
 
@@ -115,12 +115,12 @@ class BrowserManager {
         this.currentPageIndex++;
 
         const lastUserMsg = messages.filter(m => m.role === 'user').pop();
-        const messageText = lastUserMsg ? lastUserMsg.content : '你好';
+        const messageText = lastUserMsg ? lastUserMsg.content : 'Hello';
 
         console.log(`[BrowserManager] handleChatCompletion → model:${model}, msg:"${messageText.substring(0, 50)}"`);
 
         try {
-            // 1. 确保页面在 lmarena.ai
+            // 1. Make sure the page is on lmarena.ai
             const currentUrl = page.url();
             if (!currentUrl.includes('lmarena.ai') && !currentUrl.includes('arena.ai')) {
                 console.log('[BrowserManager] Navigating to lmarena.ai...');
@@ -131,39 +131,39 @@ class BrowserManager {
                 await sleep(2000);
             }
 
-            // 2. 点击 "New Chat" 或导航到 direct mode 开始新对话
+            // 2. Click "New Chat" or navigate to direct mode to start a new chat
             await this.startNewChat(page);
 
-            // 3. 选择模型（direct mode 下有模型选择器）
+            // 3. Select the model (direct mode has a model selector)
             await this.selectModel(page, model);
 
-            // 4. 在输入框中输入消息
+            // 4. Type the message into the input box
             await this.typeMessage(page, messageText);
 
-            // 5. 发送消息
+            // 5. Send the message
             await this.sendMessage(page);
 
-            // 6. 等待并提取 AI 响应
+            // 6. Wait for and extract the AI response
             const content = await this.waitForResponse(page, requestId, model, onChunk);
 
             if (!content || content.trim().length === 0) {
-                onChunk({ error: '模型返回空响应 — 请确认已登录 lmarena.ai 且模型可用' });
+                onChunk({ error: 'The model returned an empty response — make sure you are logged in to lmarena.ai and the model is available' });
             }
         } catch (e) {
             console.error('[BrowserManager] handleChatCompletion failed:', e.message);
-            onChunk({ error: '执行失败：' + e.message });
+            onChunk({ error: 'Execution failed: ' + e.message });
         }
     }
 
-    // 开始新对话
+    // Start a new chat
     async startNewChat(page) {
         try {
-            // 尝试找 "New Chat" 按钮
+            // Try to find the "New Chat" button
             const clicked = await page.evaluate(() => {
                 const btns = [...document.querySelectorAll('button, a, [role="button"]')];
                 const newChatBtn = btns.find(el => {
                     const text = (el.textContent || '').trim().toLowerCase();
-                    return text === 'new chat' || text.includes('new chat') || text === '新对话';
+                    return text === 'new chat' || text.includes('new chat');
                 });
                 if (newChatBtn) {
                     newChatBtn.click();
@@ -176,7 +176,7 @@ class BrowserManager {
                 console.log('[BrowserManager] Clicked "New Chat"');
                 await sleep(1000);
             } else {
-                // 导航到 direct mode 开始新对话
+                // Navigate to direct mode to start a new chat
                 await page.goto('https://lmarena.ai/?mode=direct', {
                     waitUntil: 'domcontentloaded',
                     timeout: 30000
@@ -189,11 +189,11 @@ class BrowserManager {
         }
     }
 
-    // 选择模型
+    // Select a model
     async selectModel(page, model) {
         try {
             const selected = await page.evaluate((targetModel) => {
-                // 方法1: select 元素
+                // Method 1: select element
                 const selects = document.querySelectorAll('select');
                 for (const sel of selects) {
                     const options = [...sel.options];
@@ -207,13 +207,12 @@ class BrowserManager {
                     }
                 }
 
-                // 方法2: 点击模型选择按钮打开下拉菜单
+                // Method 2: click the model selector button to open the dropdown
                 const btns = [...document.querySelectorAll('button, [role="button"], [role="combobox"]')];
                 const modelBtn = btns.find(el => {
                     const text = (el.textContent || '').toLowerCase();
-                    // 查找包含 "model" 或已知模型名的按钮
-                    return text.includes('select model') || text.includes('choose model') ||
-                           text.includes('选择模型') || text.includes('direct');
+                    // Find a button containing "model" or a known model name
+                    return text.includes('select model') || text.includes('choose model') || text.includes('direct');
                 });
 
                 if (modelBtn) {
@@ -226,7 +225,7 @@ class BrowserManager {
 
             if (selected === 'opened_menu') {
                 await sleep(500);
-                // 从下拉菜单中选择目标模型
+                // Select the target model from the dropdown
                 await page.evaluate((targetModel) => {
                     const items = [...document.querySelectorAll(
                         '[role="option"], [role="listbox"] li, [role="menuitem"], ' +
@@ -252,24 +251,24 @@ class BrowserManager {
         }
     }
 
-    // 在输入框输入消息
+    // Type the message in the input box
     async typeMessage(page, messageText) {
         try {
-            // 等待输入框出现
+            // Wait for the input box to appear
             await page.waitForSelector('textarea, [contenteditable="true"]', { timeout: 15000 });
             await sleep(300);
 
-            // 清空输入框并输入
+            // Clear the input box and type the message
             await page.evaluate((text) => {
                 const textarea = document.querySelector('textarea') ||
                                 document.querySelector('[contenteditable="true"]');
-                if (!textarea) throw new Error('输入框未找到');
+                if (!textarea) throw new Error('Input box not found');
 
-                // 聚焦
+                // Focus it
                 textarea.focus();
 
                 if (textarea.tagName === 'TEXTAREA' || textarea.tagName === 'INPUT') {
-                    // 使用 React 兼容的方式设置值
+                    // Set the value in a React-compatible way
                     const nativeSetter = Object.getOwnPropertyDescriptor(
                         window.HTMLTextAreaElement.prototype, 'value'
                     )?.set;
@@ -288,21 +287,20 @@ class BrowserManager {
 
             console.log('[BrowserManager] Message typed:', messageText.substring(0, 30) + '...');
         } catch (e) {
-            throw new Error('无法在页面中找到输入框: ' + e.message);
+            throw new Error('Could not find an input box on the page: ' + e.message);
         }
     }
 
-    // 发送消息
+    // Send the message
     async sendMessage(page) {
         try {
             const sent = await page.evaluate(() => {
-                // 策略1: 找发送按钮
+                // Strategy 1: find the send button
                 const strategies = [
                     () => document.querySelector('button[aria-label*="Send" i]'),
-                    () => document.querySelector('button[aria-label*="发送" i]'),
                     () => document.querySelector('button[type="submit"]'),
                     () => {
-                        // 在输入框容器附近找按钮
+                        // Find a button near the input box container
                         const input = document.querySelector('textarea, [contenteditable="true"]');
                         if (!input) return null;
                         const form = input.closest('form') || input.parentElement?.parentElement;
@@ -311,7 +309,7 @@ class BrowserManager {
                         return btns[btns.length - 1] || null;
                     },
                     () => {
-                        // 找带 SVG 发送图标的按钮
+                        // Find a button with an SVG send icon
                         const btns = [...document.querySelectorAll('button')];
                         return btns.find(btn => {
                             const svg = btn.querySelector('svg');
@@ -333,7 +331,7 @@ class BrowserManager {
             });
 
             if (!sent) {
-                // 回退：按 Enter 发送
+                // Fallback: press Enter to send
                 await page.keyboard.press('Enter');
                 console.log('[BrowserManager] Used Enter to send');
             } else {
@@ -346,16 +344,16 @@ class BrowserManager {
         }
     }
 
-    // 等待 AI 响应（轮询 DOM 变化）
+    // Wait for the AI response (poll for DOM changes)
     async waitForResponse(page, requestId, model, onChunk) {
         return new Promise((resolve) => {
             let lastContent = '';
             let lastLength = 0;
             let stableCount = 0;
             let pollCount = 0;
-            const MAX_STABLE = 10;     // 连续 10 次内容不变则认为完成
-            const MIN_POLLS = 6;       // 至少轮询 6 次才开始判断
-            const POLL_INTERVAL = 600; // 每 600ms 轮询
+            const MAX_STABLE = 10;     // if content is unchanged 10 times in a row, consider it complete
+            const MIN_POLLS = 6;       // poll at least 6 times before judging completion
+            const POLL_INTERVAL = 600; // poll every 600ms
 
             const timeout = setTimeout(() => {
                 cleanup();
@@ -376,8 +374,8 @@ class BrowserManager {
                     }
 
                     const result = await page.evaluate(() => {
-                        // 查找 AI 响应文本
-                        // 策略1: 查找 assistant/message 相关 DOM
+                        // Find the AI response text
+                        // Strategy 1: look for assistant/message-related DOM
                         const selectors = [
                             '[class*="assistant"] [class*="markdown"], [class*="assistant"] [class*="prose"]',
                             '[class*="assistant"] [class*="message"], [class*="assistant"] [class*="content"]',
@@ -392,14 +390,14 @@ class BrowserManager {
                         for (const sel of selectors) {
                             const els = document.querySelectorAll(sel);
                             if (els.length > 0) {
-                                // 取最后一个（最新的响应）
+                                // Take the last one (the newest response)
                                 const last = els[els.length - 1];
                                 const text = (last.innerText || last.textContent || '').trim();
                                 if (text.length > 2) return { text, found: true };
                             }
                         }
 
-                        // 策略2: 查找所有消息块，排除用户消息
+                        // Strategy 2: find all message blocks, excluding user messages
                         const allMsgs = document.querySelectorAll('[class*="message"], [class*="turn"], [class*="bubble"]');
                         const texts = [];
                         for (const msg of allMsgs) {
@@ -407,11 +405,11 @@ class BrowserManager {
                             if (text.length > 5) texts.push(text);
                         }
                         if (texts.length >= 2) {
-                            // 最后一个通常是 AI 响应
+                            // The last one is usually the AI response
                             return { text: texts[texts.length - 1], found: true };
                         }
 
-                        // 策略3: 查找 streaming/loading 指示器
+                        // Strategy 3: look for streaming/loading indicators
                         const loading = document.querySelector(
                             '[class*="loading"], [class*="typing"], [class*="streaming"], ' +
                             '[class*="cursor"], [class*="blink"]'
@@ -427,7 +425,7 @@ class BrowserManager {
 
                     if (result.found && result.text.length > 0) {
                         if (result.text.length > lastLength) {
-                            // 内容增长了，发送增量
+                            // Content grew — send the delta
                             const delta = result.text.substring(lastLength);
                             lastContent = result.text;
                             lastLength = result.text.length;
@@ -448,7 +446,7 @@ class BrowserManager {
                             stableCount++;
                         }
 
-                        // 判断完成
+                        // Check for completion
                         if (stableCount >= MAX_STABLE && pollCount >= MIN_POLLS && lastContent.length > 0) {
                             cleanup();
                             onChunk({
@@ -463,7 +461,7 @@ class BrowserManager {
                         }
                     }
 
-                    // 检测错误
+                    // Detect errors
                     if (pollCount > 5 && !lastContent) {
                         const errorText = await page.evaluate(() => {
                             const errEls = document.querySelectorAll('[class*="error"], [role="alert"]');
@@ -475,7 +473,7 @@ class BrowserManager {
                         }).catch(() => null);
                         if (errorText) {
                             cleanup();
-                            onChunk({ error: '页面错误: ' + errorText });
+                            onChunk({ error: 'Page error: ' + errorText });
                             resolve('');
                         }
                     }
@@ -489,13 +487,13 @@ class BrowserManager {
         });
     }
 
-    // ========== 浏览器实例创建 ==========
+    // ========== Browser instance creation ==========
 
     async createInstance() {
         let chromePath = this.cachedChromePath;
         if (!chromePath) chromePath = await this.findChromePath();
         if (!chromePath) {
-            throw new Error('无法创建浏览器实例：未找到可用的浏览器（Chrome/Edge）。');
+            throw new Error('Cannot create browser instance: no usable browser (Chrome/Edge) found.');
         }
         console.log(`[BrowserManager] Launching browser: ${chromePath}`);
 
@@ -530,7 +528,7 @@ class BrowserManager {
         let page = null;
         let pages = null;
 
-        // 拦截 chat.lmarena.ai 重定向标签页
+        // Intercept chat.lmarena.ai redirect tabs
         browser.on('targetcreated', async (target) => {
             try {
                 if (target.type() !== 'page') return;
@@ -545,11 +543,11 @@ class BrowserManager {
             } catch (e) {}
         });
 
-        // 获取初始页面
+        // Get the initial page
         pages = await browser.pages();
         page = pages[0] || await browser.newPage();
 
-        // 注入反检测脚本
+        // Inject the anti-detection script
         await page.evaluateOnNewDocument(() => {
             Object.defineProperty(navigator, 'webdriver', {
                 get: () => undefined,
@@ -558,12 +556,12 @@ class BrowserManager {
             window.chrome = window.chrome || {};
             window.chrome.runtime = window.chrome.runtime || {};
             Object.defineProperty(navigator, 'languages', {
-                get: () => ['zh-CN', 'zh', 'en-US', 'en'],
+                get: () => ['en-US', 'en'],
                 configurable: true
             });
         });
 
-        // 导航到 lmarena.ai
+        // Navigate to lmarena.ai
         try {
             await page.goto('https://lmarena.ai/?mode=direct', {
                 waitUntil: 'domcontentloaded',
@@ -594,7 +592,7 @@ class BrowserManager {
         return { browser, page, info: instanceInfo };
     }
 
-    // ========== 模型列表管理 ==========
+    // ========== Model list management ==========
 
     async updateModels() {
         if (this.pages.length === 0) {
@@ -610,16 +608,16 @@ class BrowserManager {
                 return;
             }
 
-            // 方法1: 从页面 JS 上下文提取模型列表（最准确，包含 UUID）
+            // Method 1: extract the model list from the page JS context (most accurate, includes UUIDs)
             try {
                 const jsModels = await page.evaluate(() => {
                     const results = [];
                     try {
-                        // Next.js 页面数据中的模型列表
+                        // Model list in the Next.js page data
                         const nextData = window.__NEXT_DATA__;
                         if (nextData) {
                             const jsonStr = JSON.stringify(nextData);
-                            // 提取 initialModels 数组
+                            // Extract the initialModels array
                             const modelsMatch = jsonStr.match(/"initialModels"\s*:\s*(\[[\s\S]*?\])\s*,\s*"/);
                             if (modelsMatch) {
                                 try {
@@ -636,13 +634,13 @@ class BrowserManager {
                         }
                     } catch (e) {}
 
-                    // 备选：从页面 DOM 提取
+                    // Fallback: extract from the page DOM
                     try {
                         document.querySelectorAll('select option, [role="option"]').forEach(el => {
                             const val = (el.value || el.getAttribute('data-value') || el.textContent || '').trim();
                             const text = (el.textContent || '').trim();
                             if (val && val.length >= 3 && val.length <= 80) {
-                                // 避免重复
+                                // Avoid duplicates
                                 if (!results.find(r => r.id === val || r.name === text)) {
                                     results.push({ id: val, name: text || val });
                                 }
@@ -666,7 +664,7 @@ class BrowserManager {
                 }
             } catch (e) {}
 
-            // 方法2: 从 HTML 解析
+            // Method 2: parse from HTML
             try {
                 const html = await page.content();
                 if (html && html.length > 1000) {
@@ -679,7 +677,7 @@ class BrowserManager {
                 }
             } catch (e) {}
 
-            // 兜底
+            // Final fallback
             this.models = this.getDefaultModels();
         } catch (error) {
             console.error('[BrowserManager] updateModels error:', error.message);
@@ -688,7 +686,7 @@ class BrowserManager {
     }
 
     getDefaultModels() {
-        // 2026年4月更新 — 覆盖 lmarena.ai 常见模型
+        // Updated April 2026 — covers common models on lmarena.ai
         return [
             // OpenAI
             { id: 'chatgpt-4o-latest', name: 'ChatGPT-4o Latest' },
@@ -806,7 +804,7 @@ class BrowserManager {
 
     async closeInstance(instanceId) {
         const idx = this.instanceInfos.findIndex(info => info.id === instanceId);
-        if (idx === -1) throw new Error('实例不存在: #' + instanceId);
+        if (idx === -1) throw new Error('Instance does not exist: #' + instanceId);
         const browser = this.browsers[idx];
         const page = this.pages[idx];
         if (page) try { await page.close(); } catch (e) {}

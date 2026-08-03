@@ -31,7 +31,7 @@
     let capturedDirectTemplate = null;
     let capturedArenaTemplate = null;
 
-    // 请求劫持
+    // Request hijack
     let pendingHijack = null;
 
     const originalFetch = window.fetch;
@@ -42,7 +42,7 @@
         else if (urlArg instanceof URL) { urlString = urlArg.href; }
         else if (typeof urlArg === 'string') { urlString = urlArg; }
 
-        // 诊断: 记录 API 相关 fetch 调用
+        // Diagnostics: log API-related fetch calls
         if (urlString && (urlString.includes('evaluation') || urlString.includes('api') || urlString.includes('stream'))) {
             const shortUrl = urlString.substring(0, 150);
             console.log(`[AI Proxy Bridge] FETCH: ${shortUrl} | pendingHijack=${!!pendingHijack}`);
@@ -65,7 +65,7 @@
                 capturedRequestTemplate = { url: urlString, headers, body, contentType };
                 if (body && body.recaptchaV3Token) window.recaptchaToken = body.recaptchaV3Token;
 
-                // 请求劫持
+                // Request hijack
                 if (pendingHijack && body && typeof body === 'object') {
                     const hijack = pendingHijack;
                     pendingHijack = null;
@@ -81,20 +81,20 @@
 
                     const hijackedResponse = await originalFetch.apply(this, args);
 
-                    // 429: reCAPTCHA 拒绝，不清除 pendingHijack，允许手动重试
+                    // 429: rejected by reCAPTCHA — don't clear pendingHijack, allow manual retry
                     if (hijackedResponse.status === 429) {
                         console.warn('[AI Proxy Bridge] Hijacked request got 429 — reCAPTCHA rejected');
                         hijack.autoSubmitted = true;
                         if (socket && socket.readyState === WebSocket.OPEN) {
                             socket.send(JSON.stringify({
                                 type: 'status',
-                                data: { status: 'auto_submit_429', requestId: hijack.requestId, message: '自动提交被 reCAPTCHA 拒绝，请在浏览器中手动按 Enter 发送消息' }
+                                data: { status: 'auto_submit_429', requestId: hijack.requestId, message: 'Auto-submit was rejected by reCAPTCHA — press Enter manually in the browser to send the message' }
                             }));
                         }
                         return new Response('', { status: 200, headers: { 'Content-Type': 'text/plain' } });
                     }
 
-                    // 非 429：成功劫持
+                    // Non-429: hijack succeeded
                     pendingHijack = null;
                     (async () => {
                         try {
@@ -109,7 +109,7 @@
                     return new Response('', { status: 200, headers: { 'Content-Type': 'text/plain' } });
                 }
 
-                // 从捕获的请求中提取 modelAId
+                // Extract modelAId from the captured request
                 if (body && body.modelAId && /^[0-9a-f]{8}-/i.test(body.modelAId)) {
                     console.log(`[AI Proxy Bridge] Captured modelAId UUID: ${body.modelAId}`);
                     addModelMapping('captured-modelAId', body.modelAId, 'Captured Model');
@@ -166,7 +166,7 @@
         } catch (e) {}
     }
 
-    // UUIDv7 生成（BigInt 精度，服务器校验时间戳）
+    // UUIDv7 generation (BigInt precision; the server validates the timestamp)
     function uuid7() {
         const ts = BigInt(Date.now());
         const randA = BigInt(Math.floor(Math.random() * 0x1000));
@@ -201,7 +201,7 @@
         return models;
     }
 
-    // RSC 飞行数据提取
+    // RSC flight data extraction
     function extractModelsFromRSC() {
         let models = [];
         let modelAId = '';
@@ -255,7 +255,7 @@
         return { models, modelAId };
     }
 
-    // 点击下拉菜单提取模型
+    // Click the dropdown menu to extract models
     async function extractModelsViaDropdown() {
         const extracted = [];
         try {
@@ -297,7 +297,7 @@
         modelSlugList = rscData.models;
         initialModelAId = rscData.modelAId;
         console.log(`[AI Proxy Bridge] RSC: ${modelSlugList.length} slugs, initialModelAId: ${initialModelAId || 'none'}`);
-        // 如果 RSC 失败，从页面 HTML 扫描 slug
+        // If RSC fails, scan slugs from the page HTML
         if (modelSlugList.length === 0) {
             const htmlSlugs = extractModelsFromPageHTML();
             if (htmlSlugs.length > 0) {
@@ -372,7 +372,7 @@
         };
     }
 
-    // ========== DOM 操作：填入消息到输入框 ==========
+    // ========== DOM operations: fill the message into the input box ==========
     function findChatInput() {
         const selectors = ['textarea[placeholder]', 'textarea[name="message"]', 'form textarea', 'textarea'];
         for (const sel of selectors) {
@@ -385,16 +385,16 @@
     function setReactInputValue(element, value) {
         element.focus();
 
-        // 方法1: execCommand — 最可靠，走浏览器原生输入管道
+        // Method 1: execCommand — most reliable, uses the browser's native input pipeline
         try {
             element.select();
             if (document.execCommand('insertText', false, value)) {
-                console.log('[AI Proxy Bridge] setReactInputValue: execCommand 成功');
+                console.log('[AI Proxy Bridge] setReactInputValue: execCommand succeeded');
                 return;
             }
         } catch (e) {}
 
-        // 方法2: native setter + InputEvent（React 18 兼容）
+        // Method 2: native setter + InputEvent (React 18 compatible)
         const nativeSetter = Object.getOwnPropertyDescriptor(
             element.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype, 'value'
         )?.set;
@@ -411,7 +411,7 @@
         element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
         element.dispatchEvent(new KeyboardEvent('keypress', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
         element.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
-        console.log('[AI Proxy Bridge] 已模拟 Enter 键');
+        console.log('[AI Proxy Bridge] Enter key simulated');
         return true;
     }
 
@@ -419,11 +419,11 @@
         const input = findChatInput();
         if (!input) return false;
         setReactInputValue(input, content);
-        console.log('[AI Proxy Bridge] 消息已填入输入框，将自动尝试提交');
+        console.log('[AI Proxy Bridge] Message filled into the input box — will try to auto-submit');
         return true;
     }
 
-    // ========== MutationObserver: 监听页面 DOM 捕获 AI 响应 ==========
+    // ========== MutationObserver: watch page DOM to capture the AI response ==========
     let domObserver = null;
     let domObserverRequestId = null;
     let lastAssistantText = '';
@@ -483,7 +483,7 @@
         return null;
     }
 
-    // ========== Fetch 诊断日志 ==========
+    // ========== Fetch diagnostics log ==========
     let fetchLog = [];
 
     function connect() {
@@ -512,10 +512,10 @@
                 (async () => {
                     try {
                         const model = data.model || '';
-                        const content = data.content || '你好';
+                        const content = data.content || 'Hello';
                         const modelAId = (buildDirectModeBody(model, content, data.modelAId)).modelAId;
 
-                        // ====== 双重策略: fetch 劫持 + DOM 监听 ======
+                        // ====== Dual strategy: fetch hijack + DOM watching ======
                         console.log(`[AI Proxy Bridge] Setting up hijack + DOM observer: modelAId=${modelAId}`);
 
                         const inputFilled = fillChatInput(content);
@@ -524,17 +524,17 @@
                         const hijackPromise = new Promise(resolve => { hijackResolve = resolve; });
                         pendingHijack = { requestId: request_id, modelAId, content, resolve: hijackResolve, autoSubmitted: false };
 
-                        // 同时启动 DOM 监听
+                        // Also start DOM watching at the same time
                         startDOMObserver(request_id);
 
                         if (socket && socket.readyState === WebSocket.OPEN) {
                             socket.send(JSON.stringify({
                                 type: 'status',
-                                data: { status: 'waiting_for_trigger', requestId: request_id, message: inputFilled ? '消息已填入，将自动提交并监听响应' : '请发送一条消息' }
+                                data: { status: 'waiting_for_trigger', requestId: request_id, message: inputFilled ? 'Message filled — will auto-submit and listen for the response' : 'Please send a message on the page' }
                             }));
                         }
 
-                        // 延迟 800ms 后自动模拟 Enter
+                        // Auto-simulate Enter after an 800ms delay
                         setTimeout(() => {
                             if (pendingHijack && pendingHijack.requestId === request_id) {
                                 simulateEnterKey(findChatInput());
@@ -542,12 +542,12 @@
                             }
                         }, 800);
 
-                        // 等待: fetch 劫持 或 DOM 监听
+                        // Wait: fetch hijack or DOM watching
                         const startTime = Date.now();
                         while (Date.now() - startTime < 120000) {
                             await new Promise(r => setTimeout(r, 500));
                             if (!activeRequests.has(request_id)) { pendingHijack = null; stopDOMObserver(); return; }
-                            if (!pendingHijack) { stopDOMObserver(); return; } // fetch 劫持成功
+                            if (!pendingHijack) { stopDOMObserver(); return; } // fetch hijack succeeded
                             if (lastAssistantText && domObserverRequestId === request_id) {
                                 sendToServer(request_id, '[DONE]');
                                 pendingHijack = null;
@@ -558,7 +558,7 @@
 
                         pendingHijack = null;
                         stopDOMObserver();
-                        throw new Error('请求超时 — 请在浏览器中手动按 Enter 发送消息，或在 lmarena.ai 页面刷新后重试。');
+                        throw new Error('Request timed out — press Enter manually in the browser to send the message, or refresh the lmarena.ai page and try again.');
                     } catch (error) {
                         window.isProxyRequest = false;
                         if (error.name !== 'AbortError') { console.error('[AI Proxy Bridge] Error:', error.message); sendToServer(request_id, { error: error.message }); }

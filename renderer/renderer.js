@@ -1,10 +1,10 @@
 /* ========================================
-   AI Proxy Bridge - 渲染进程脚本 v3
-   圆润丝滑 / 模型Logo+能力 / 测试面板 / 实例关闭
+   AI Proxy Bridge - Renderer process script v3
+   Smooth & rounded / Model logos + capabilities / Test panel / Instance closing
    ======================================== */
 
-// 模型元数据 — 用于已知的模型，未知模型使用 PROVIDER_RULES 模糊匹配
-// 更新至 2026年4月，覆盖 lmarena.ai 常见模型
+// Model metadata — used for known models; unknown models fall back to PROVIDER_RULES fuzzy matching
+// Updated April 2026, covers common models on lmarena.ai
 const MODEL_META = {
     // ===== OpenAI =====
     'chatgpt-4o-latest':  { color:'#10a37f', bg:'linear-gradient(135deg,#e8f5e9,#c8e6c9)', logoType:'openai', provider:'OpenAI' },
@@ -108,7 +108,7 @@ const MODEL_META = {
     'mimo':               { color:'#0891b2', bg:'linear-gradient(135deg,#ecfeff,#cffafe)', logoType:'', provider:'MiniMax' },
 };
 
-// 根据 model ID 模糊匹配 provider 和 logoType
+// Fuzzy-match provider and logoType from the model ID
 const PROVIDER_RULES = [
     { pattern: /^(gpt-|o[134]-?|dall-e|chatgpt-)/i, provider: 'OpenAI', logoType: 'openai', color: '#10a37f', bg: 'linear-gradient(135deg,#e8f5e9,#c8e6c9)' },
     { pattern: /^claude-/i, provider: 'Anthropic', logoType: 'anthropic', color: '#d97706', bg: 'linear-gradient(135deg,#fef3c7,#fde68a)' },
@@ -153,7 +153,7 @@ const PROVIDER_RULES = [
     { pattern: /^(falcon-)/i, provider: 'TII', logoType: '', color: '#2563eb', bg: 'linear-gradient(135deg,#dbeafe,#bfdbfe)' },
     { pattern: /^(stabilityai-)/i, provider: 'Stability AI', logoType: '', color: '#7c3aed', bg: 'linear-gradient(135deg,#ede9fe,#ddd6fe)' },
     { pattern: /^(meta-llama-)/i, provider: 'Meta', logoType: 'meta', color: '#6366f1', bg: 'linear-gradient(135deg,#eef2ff,#e0e7ff)' },
-    // 包含厂商名的 slug（如 openai/gpt-4o, anthropic/claude-3 等）
+    // Slugs containing vendor names (e.g. openai/gpt-4o, anthropic/claude-3, etc.)
     { pattern: /\/(gpt-|o[134]|dall-e|chatgpt)/i, provider: 'OpenAI', logoType: 'openai', color: '#10a37f', bg: 'linear-gradient(135deg,#e8f5e9,#c8e6c9)' },
     { pattern: /\/claude-/i, provider: 'Anthropic', logoType: 'anthropic', color: '#d97706', bg: 'linear-gradient(135deg,#fef3c7,#fde68a)' },
     { pattern: /\/(gemini-|gemma-|imagen-)/i, provider: 'Google', logoType: 'google', color: '#4285f4', bg: 'linear-gradient(135deg,#e8f0fe,#d4e4fd)' },
@@ -163,7 +163,7 @@ const PROVIDER_RULES = [
     { pattern: /\/(mistral-|mixtral-|pixtral-)/i, provider: 'Mistral', logoType: 'mistral', color: '#ff7000', bg: 'linear-gradient(135deg,#fff7ed,#ffedd5)' },
     { pattern: /\/grok-/i, provider: 'xAI', logoType: 'xai', color: '#000', bg: 'linear-gradient(135deg,#f5f5f5,#e5e5e5)' },
     { pattern: /\/glm-/i, provider: 'Zhipu', logoType: '', color: '#3b82f6', bg: 'linear-gradient(135deg,#dbeafe,#bfdbfe)' },
-    // 关键词匹配：slug 中包含厂商名
+    // Keyword matching: vendor name contained anywhere in the slug
     { pattern: /openai/i, provider: 'OpenAI', logoType: 'openai', color: '#10a37f', bg: 'linear-gradient(135deg,#e8f5e9,#c8e6c9)' },
     { pattern: /anthropic/i, provider: 'Anthropic', logoType: 'anthropic', color: '#d97706', bg: 'linear-gradient(135deg,#fef3c7,#fde68a)' },
     { pattern: /google/i, provider: 'Google', logoType: 'google', color: '#4285f4', bg: 'linear-gradient(135deg,#e8f0fe,#d4e4fd)' },
@@ -197,11 +197,11 @@ const PROVIDER_RULES = [
 ];
 
 function getModelMeta(modelId, modelName) {
-    // 先精确匹配 MODEL_META
+    // Exact-match MODEL_META first
     if (MODEL_META[modelId]) return MODEL_META[modelId];
-    // 用 name 也尝试匹配
+    // Also try matching by name
     if (modelName && MODEL_META[modelName]) return MODEL_META[modelName];
-    // 用 name 做 PROVIDER_RULES 模糊匹配（name 更可能是 slug 如 "gpt-4o"）
+    // Fuzzy-match PROVIDER_RULES with the name (name is more likely to be a slug like "gpt-4o")
     var tryValues = [modelId];
     if (modelName) tryValues.push(modelName);
     for (var i = 0; i < tryValues.length; i++) {
@@ -224,7 +224,7 @@ const DEFAULT_MODEL_CAPS = { thinking:false, web:false, image:false, research:fa
 };
 
 
-// ===== DOM 引用 =====
+// ===== DOM references =====
 var tabs = document.querySelectorAll('.tab-btn');
 var tabContents = document.querySelectorAll('.tab-content');
 var startBtn = document.getElementById('start-service');
@@ -251,7 +251,7 @@ var winClose = document.getElementById('win-close');
 var toggleKeyVis = document.getElementById('toggle-key-visibility');
 var apiKeyInput = document.getElementById('api-key-input');
 
-// 测试面板 DOM
+// Test panel DOM
 var testPanel = document.getElementById('test-panel');
 var testModelName = document.getElementById('test-model-name');
 var testInput = document.getElementById('test-input');
@@ -262,12 +262,12 @@ var testPanelClose = document.getElementById('test-panel-close');
 var isServiceRunning = false;
 var config = {};
 
-// ========== 窗口控制按钮 ==========
+// ========== Window control buttons ==========
 if (winMinimize) winMinimize.addEventListener('click', function () { window.api.minimizeWindow(); });
 if (winMaximize) winMaximize.addEventListener('click', function () { window.api.maximizeWindow(); });
 if (winClose) winClose.addEventListener('click', function () { window.api.closeWindow(); });
 
-// 窗口最大化状态图标切换
+// Toggle maximize icon based on window state
 window.api.onWindowStateChange(function (state) {
     var svg = winMaximize.querySelector('svg');
     if (state && state.maximized) {
@@ -277,7 +277,7 @@ window.api.onWindowStateChange(function (state) {
     }
 });
 
-// ========== 主题系统 ==========
+// ========== Theme system ==========
 (function () {
     var saved = localStorage.getItem('apb-theme') || 'light';
     setTheme(saved);
@@ -299,14 +299,14 @@ if (themeToggle) themeToggle.addEventListener('click', function () {
     setTheme(cur === 'dark' ? 'light' : 'dark');
 });
 
-// ========== 帮助面板 ==========
+// ========== Help panel ==========
 function openHelp() { helpPanel.classList.remove('hidden'); document.body.style.overflow = 'hidden'; }
 function closeHelp() { helpPanel.classList.add('hidden'); document.body.style.overflow = ''; }
 if (helpBtn) helpBtn.addEventListener('click', openHelp);
 if (closeHelpBtn) closeHelpBtn.addEventListener('click', closeHelp);
 if (helpPanel) helpPanel.addEventListener('click', function (e) { if (e.target === helpPanel) closeHelp(); });
 document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !helpPanel.classList.contains('hidden')) closeHelp(); });
-// 主进程触发
+// Triggered from the main process
 window.api.onOpenHelp(openHelp);
 window.api.onNavigateTab(function (tabId) {
     switchTab(tabId);
@@ -317,7 +317,7 @@ function switchTab(tabId) {
     if (btn) btn.click();
 }
 
-// ========== Tooltip 系统 ==========
+// ========== Tooltip system ==========
 var tooltipTimer = null;
 document.querySelectorAll('.tooltip-trigger').forEach(function (el) {
     el.addEventListener('mouseenter', function (e) {
@@ -345,7 +345,7 @@ document.querySelectorAll('.tooltip-trigger').forEach(function (el) {
     });
 });
 
-// ========== 标签页切换 ==========
+// ========== Tab switching ==========
 tabs.forEach(function (btn) {
     btn.addEventListener('click', function () {
         var tabId = this.getAttribute('data-tab');
@@ -359,22 +359,22 @@ tabs.forEach(function (btn) {
     });
 });
 
-// ========== 日志 ==========
+// ========== Logs ==========
 function addLog(msg, type) {
     type = type || 'info';
     var entry = document.createElement('div');
     entry.className = 'log-entry ' + type;
-    var ts = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+    var ts = new Date().toLocaleTimeString('en-US', { hour12: false });
     entry.textContent = '[' + ts + '] ' + msg;
     logContainer.appendChild(entry);
     logContainer.scrollTop = logContainer.scrollHeight;
     while (logContainer.children.length > 500) { logContainer.removeChild(logContainer.firstChild); }
 }
 if (clearLogsBtn) clearLogsBtn.addEventListener('click', function () {
-    logContainer.innerHTML = '<div class="log-entry info">[系统] 日志已清空</div>';
+    logContainer.innerHTML = '<div class="log-entry info">[System] Logs cleared</div>';
 });
 
-// ========== 密钥显示/隐藏 ==========
+// ========== API key show/hide ==========
 if (toggleKeyVis && apiKeyInput) {
     toggleKeyVis.addEventListener('click', function () {
         var isPassword = apiKeyInput.type === 'password';
@@ -386,7 +386,7 @@ if (toggleKeyVis && apiKeyInput) {
     if (apiKeyInput.value) apiKeyInput.type = 'password';
 }
 
-// ========== 配置管理 ==========
+// ========== Configuration ==========
 async function loadConfig() {
     try {
         config = await window.api.getConfig();
@@ -397,10 +397,10 @@ async function loadConfig() {
         var apiUrlEl = document.getElementById('api-url');
         var apiKeyEl = document.getElementById('api-key');
         if (apiUrlEl) apiUrlEl.textContent = 'http://127.0.0.1:' + (config.httpPort || 61001);
-        if (apiKeyEl) apiKeyEl.textContent = config.apiKey || '未设置';
+        if (apiKeyEl) apiKeyEl.textContent = config.apiKey || 'Not set';
 
         if (apiKeyInput && apiKeyInput.value) apiKeyInput.type = 'password';
-    } catch (err) { addLog('加载配置失败: ' + err.message, 'error'); }
+    } catch (err) { addLog('Failed to load config: ' + err.message, 'error'); }
 }
 if (configForm) configForm.addEventListener('submit', async function (e) {
     e.preventDefault();
@@ -410,12 +410,12 @@ if (configForm) configForm.addEventListener('submit', async function (e) {
     };
     try {
         await window.api.updateConfig(nc);
-        addLog('配置已保存，服务将自动重启以应用新配置', 'info');
+        addLog('Configuration saved — the service will restart automatically to apply the new settings', 'info');
         await loadConfig();
-    } catch (err) { addLog('保存失败: ' + err.message, 'error'); }
+    } catch (err) { addLog('Save failed: ' + err.message, 'error'); }
 });
 
-// ========== 复制功能 ==========
+// ========== Copy functionality ==========
 document.querySelectorAll('[data-copy]').forEach(function (btn) {
     btn.addEventListener('click', function () {
         var tid = this.getAttribute('data-copy');
@@ -426,74 +426,74 @@ document.querySelectorAll('[data-copy]').forEach(function (btn) {
             this.textContent = '✓';
             this.style.color = 'var(--success)';
             this.style.borderColor = 'var(--success)';
-            addLog('已复制: ' + text, 'info');
+            addLog('Copied: ' + text, 'info');
             var self = this;
             setTimeout(function () {
                 self.textContent = orig;
                 self.style.color = '';
                 self.style.borderColor = '';
             }, 1200);
-        }.bind(this), function () { addLog('复制失败，请手动复制', 'warning'); });
+        }.bind(this), function () { addLog('Copy failed, please copy manually', 'warning'); });
     });
 });
 
-// ========== 服务控制 — 带状态联动 ==========
+// ========== Service control — with linked status ==========
 if (startBtn) startBtn.addEventListener('click', async function () {
     try {
-        addLog('正在启动代理服务...', 'info');
-        this.disabled = true; this.innerHTML = '<svg class="spin" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/></svg> 启动中...';
+        addLog('Starting proxy service...', 'info');
+        this.disabled = true; this.innerHTML = '<svg class="spin" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/></svg> Starting...';
         await window.api.startServices();
-        addLog('服务启动成功', 'info');
-    } catch (err) { addLog('启动失败: ' + err.message, 'error'); }
+        addLog('Service started successfully', 'info');
+    } catch (err) { addLog('Startup failed: ' + err.message, 'error'); }
     finally {
-        // 不恢复按钮状态——由 onServiceStatus 回调统一管理禁用/启用
+        // Don't restore button state here — enable/disable is managed centrally by the onServiceStatus callback
     }
 });
 if (stopBtn) stopBtn.addEventListener('click', async function () {
     try {
-        addLog('正在停止服务...', 'info');
-        this.disabled = true; this.innerHTML = '停止中...';
+        addLog('Stopping service...', 'info');
+        this.disabled = true; this.innerHTML = 'Stopping...';
         await window.api.stopServices();
-        addLog('服务已停止', 'info');
-    } catch (err) { addLog('停止失败: ' + err.message, 'error'); }
+        addLog('Service stopped', 'info');
+    } catch (err) { addLog('Stop failed: ' + err.message, 'error'); }
     finally {
-        // 不恢复——由回调统一管理
+        // Don't restore here — managed centrally by the callback
     }
 });
-// 刷新模型列表按钮绑定
+// Bind refresh model list button
 if (refreshModelsBtn) refreshModelsBtn.addEventListener('click', function () { refreshModels(); });
 
-// ========== 模型列表 v3 — Logo + 能力标签 + 测试按钮 ==========
+// ========== Model list v3 — logo + capability tags + test button ==========
 async function loadModels() {
     var list = document.getElementById('models-list');
     if (!list) return;
-    list.innerHTML = '<div class="loading">正在获取模型列表...</div>';
+    list.innerHTML = '<div class="loading">Fetching model list...</div>';
     try {
         var models = await window.api.getModels();
         if (!models || models.length === 0) {
-            list.innerHTML = '<div class="empty-state"><p>暂无可用模型</p><p style="margin-top:4px;font-size:12px">请先启动服务并创建浏览器实例</p></div>';
+            list.innerHTML = '<div class="empty-state"><p>No models available</p><p style="margin-top:4px;font-size:12px">Start the service and connect a client first</p></div>';
             return;
         }
         renderModelList(models);
     } catch (err) {
-        list.innerHTML = '<div class="empty-state"><p>获取失败: ' + esc(err.message) + '</p></div>';
-        addLog('加载模型失败: ' + err.message, 'error');
+        list.innerHTML = '<div class="empty-state"><p>Fetch failed: ' + esc(err.message) + '</p></div>';
+        addLog('Failed to load models: ' + err.message, 'error');
     }
 }
 
-// 刷新模型列表：主动触发服务端重新提取
+// Refresh model list: actively trigger server-side re-extraction
 async function refreshModels() {
     var btn = document.getElementById('refresh-models');
     if (btn) {
         btn.disabled = true;
-        btn.innerHTML = '<svg class="spin" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/></svg> 刷新中...';
+        btn.innerHTML = '<svg class="spin" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/></svg> Refreshing...';
     }
 
     var list = document.getElementById('models-list');
-    if (list) list.innerHTML = '<div class="loading">正在刷新模型列表...</div>';
+    if (list) list.innerHTML = '<div class="loading">Refreshing model list...</div>';
 
-    // 不再强制要求 isServiceRunning —— 服务会在 app ready 时自动启动
-    // 即使状态回调延迟，IPC 端也能正确处理（browserManager 在 startServices 时已创建）
+    // No longer strictly requires isServiceRunning — the service auto-starts when the app is ready
+    // Even if the status callback is delayed, the IPC side handles it correctly (browserManager is created in startServices)
     console.log('[Renderer] refreshModels() → calling IPC, isServiceRunning=', isServiceRunning);
 
     try {
@@ -501,21 +501,21 @@ async function refreshModels() {
         console.log('[Renderer] refreshModels ← received:', models ? models.length : 'null/undefined', 'models');
 
         if (!models || models.length === 0) {
-            if (list) list.innerHTML = '<div class="empty-state"><p>暂无可用模型</p><p style="margin-top:4px;font-size:12px;color:var(--text-tertiary)">可能需要先创建浏览器实例并登录 arena.ai</p></div>';
-            addLog('刷新完成，未找到模型', 'warning');
+            if (list) list.innerHTML = '<div class="empty-state"><p>No models available</p><p style="margin-top:4px;font-size:12px;color:var(--text-tertiary)">You may need to create a browser instance and log in to lmarena.ai first</p></div>';
+            addLog('Refresh complete, no models found', 'warning');
         } else {
             renderModelList(models);
-            addLog('模型列表已刷新，共 ' + models.length + ' 个模型', 'success');
+            addLog('Model list refreshed, ' + models.length + ' models total', 'success');
         }
     } catch (err) {
         console.error('[Renderer] refreshModels error:', err);
         var errMsg = err && err.message ? err.message : String(err);
-        if (list) list.innerHTML = '<div class="empty-state"><p>刷新失败</p><p style="margin-top:4px;font-size:12px;color:var(--error)">' + esc(errMsg) + '</p></div>';
-        addLog('刷新模型失败: ' + errMsg, 'error');
+        if (list) list.innerHTML = '<div class="empty-state"><p>Refresh failed</p><p style="margin-top:4px;font-size:12px;color:var(--error)">' + esc(errMsg) + '</p></div>';
+        addLog('Failed to refresh models: ' + errMsg, 'error');
     } finally {
         if (btn) {
             btn.disabled = false;
-            btn.innerHTML = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6M2.5 22v-6h6"/><path d="M2.5 12a10 10 0 0 1 16.5-6.3L21.5 8M21.5 12a10 10 0 0 1-16.5 6.3L2.5 16"/></svg> 刷新列表';
+            btn.innerHTML = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6M2.5 22v-6h6"/><path d="M2.5 12a10 10 0 0 1 16.5-6.3L21.5 8M21.5 12a10 10 0 0 1-16.5 6.3L2.5 16"/></svg> Refresh List';
         }
     }
 }
@@ -524,17 +524,17 @@ function renderModelList(models) {
     var list = document.getElementById('models-list');
     if (!list) return;
 
-    // 按厂商分组
+    // Group by provider
     var groups = {};
     models.forEach(function (m) {
         var meta = getModelMeta(m.id, m.slug || m.name);
-        var provider = meta.provider || m.provider || '其他';
+        var provider = meta.provider || m.provider || 'Other';
         if (!groups[provider]) groups[provider] = { meta: meta, models: [] };
         groups[provider].models.push(m);
     });
 
-    // 排序：主要厂商优先
-    var providerOrder = ['OpenAI', 'Anthropic', 'Google', 'Meta', 'DeepSeek', 'Alibaba', 'Mistral', 'xAI', 'Microsoft', 'Zhipu', 'Moonshot', 'Cohere', 'MiniMax', '01.AI', 'Databricks', 'Baidu', 'Perplexity', 'NVIDIA', 'Stability AI', 'ByteDance', 'Tencent', 'InternLM', 'Upstage', 'NousResearch', 'Snowflake', 'Ideogram', 'StepFun', 'SenseTime', 'LMSYS', 'Inflection', 'Reka', 'Cognitive Computations', 'OpenChat', 'Playground AI', 'MosaicML', 'TII', 'MapNeo', '其他'];
+    // Sorting: major providers first
+    var providerOrder = ['OpenAI', 'Anthropic', 'Google', 'Meta', 'DeepSeek', 'Alibaba', 'Mistral', 'xAI', 'Microsoft', 'Zhipu', 'Moonshot', 'Cohere', 'MiniMax', '01.AI', 'Databricks', 'Baidu', 'Perplexity', 'NVIDIA', 'Stability AI', 'ByteDance', 'Tencent', 'InternLM', 'Upstage', 'NousResearch', 'Snowflake', 'Ideogram', 'StepFun', 'SenseTime', 'LMSYS', 'Inflection', 'Reka', 'Cognitive Computations', 'OpenChat', 'Playground AI', 'MosaicML', 'TII', 'MapNeo', 'Other'];
     var sortedGroups = Object.keys(groups).sort(function (a, b) {
         var ia = providerOrder.indexOf(a), ib = providerOrder.indexOf(b);
         if (ia === -1) ia = 999; if (ib === -1) ib = 999;
@@ -568,7 +568,7 @@ function renderModelList(models) {
         group.models.forEach(function (m) {
             var displayName = m.name || m.id;
             var copyId = m.slug || m.id;
-            // 能力标签
+            // Capability tags
             var slug = (m.slug || m.id || '').toLowerCase();
             var tags = getModelTags(slug);
             var tagsHtml = '';
@@ -577,10 +577,10 @@ function renderModelList(models) {
                     return '<span class="model-tag tag-' + t.type + '">' + t.label + '</span>';
                 }).join('') + '</span>';
             }
-            html += '<div class="model-chip" data-test-model="' + esc(m.id) + '" data-test-name="' + esc(displayName) + '" title="点击测试 ' + esc(displayName) + '">';
+            html += '<div class="model-chip" data-test-model="' + esc(m.id) + '" data-test-name="' + esc(displayName) + '" title="Click to test ' + esc(displayName) + '">';
             html += '<span class="model-chip-name">' + esc(displayName) + '</span>';
             html += tagsHtml;
-            html += '<button class="model-chip-copy" data-model-id="' + esc(copyId) + '" title="复制 ID" onclick="event.stopPropagation()">';
+            html += '<button class="model-chip-copy" data-model-id="' + esc(copyId) + '" title="Copy ID" onclick="event.stopPropagation()">';
             html += '<svg viewBox="0 0 14 14" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="4" y="4" width="7" height="7" rx="1"/><path d="M10 4V3a1 1 0 00-1-1H3a1 1 0 00-1 1v6a1 1 0 001 1h1"/></svg>';
             html += '</button>';
             html += '</div>';
@@ -591,21 +591,21 @@ function renderModelList(models) {
 
     list.innerHTML = html;
 
-    // 复制按钮事件
+    // Copy button events
     list.querySelectorAll('[data-model-id]').forEach(function (btn) {
         btn.addEventListener('click', function () {
             var mid = this.getAttribute('data-model-id');
             navigator.clipboard.writeText(mid).then(function () {
                 this.textContent = '✓';
                 this.style.color = 'var(--success)';
-                addLog('已复制: ' + mid, 'info');
+                addLog('Copied: ' + mid, 'info');
                 var self = this;
                 setTimeout(function () { self.innerHTML = '<svg viewBox="0 0 14 14" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="4" y="4" width="7" height="7" rx="1"/><path d="M10 4V3a1 1 0 00-1-1H3a1 1 0 00-1 1v6a1 1 0 001 1h1"/></svg>'; self.style.color = ''; }, 1200);
             }.bind(this));
         });
     });
 
-    // 测试按钮事件（点击模型 chip）
+    // Test button events (clicking a model chip)
     list.querySelectorAll('[data-test-model]').forEach(function (el) {
         el.addEventListener('click', function () {
             var model = this.getAttribute('data-test-model');
@@ -615,63 +615,63 @@ function renderModelList(models) {
     });
 }
 
-// 模型能力标签推断
+// Model capability tag inference
 function getModelTags(slug) {
     var tags = [];
     if (!slug) return tags;
-    // 生图
+    // Image generation
     if (/(?:dall-e|ideogram|flux|sdxl|stable-diffusion|imagen|seedream|playground|midjourney)/.test(slug)) {
-        tags.push({ type: 'image', label: '生图' });
+        tags.push({ type: 'image', label: 'Image' });
     }
-    // 视觉/图像理解
+    // Vision / image understanding
     if (/(?:vision|pixtral|gemma-3)/.test(slug) || /-(?:vision|vl)$/.test(slug)) {
-        tags.push({ type: 'vision', label: '视觉' });
+        tags.push({ type: 'vision', label: 'Vision' });
     }
-    // 视频
+    // Video
     if (/(?:veo|video|kling|sora|cogvideo|wan)/.test(slug)) {
-        tags.push({ type: 'video', label: '视频' });
+        tags.push({ type: 'video', label: 'Video' });
     }
-    // 音频/语音
+    // Audio / speech
     if (/(?:tts|audio|speech|whisper|gpt-4o-audio)/.test(slug)) {
-        tags.push({ type: 'audio', label: '音频' });
+        tags.push({ type: 'audio', label: 'Audio' });
     }
-    // 搜索/联网
+    // Search / web-connected
     if (/(?:search|grounding|perplexity|with-search)/.test(slug)) {
-        tags.push({ type: 'search', label: '搜索' });
+        tags.push({ type: 'search', label: 'Search' });
     }
-    // 思考/推理
+    // Thinking / reasoning
     if (/(?:thinking|reasoning|-r[12]$|-o[134]$)/.test(slug)) {
-        tags.push({ type: 'thinking', label: '推理' });
+        tags.push({ type: 'thinking', label: 'Reasoning' });
     }
-    // 代码
+    // Code
     if (/(?:codestral|codex|code|qwen.*coder|deepseek-coder)/.test(slug)) {
-        tags.push({ type: 'code', label: '代码' });
+        tags.push({ type: 'code', label: 'Code' });
     }
-    // 如果没有任何标签，标记为文本
+    // If no tags matched, mark as text
     if (tags.length === 0) {
-        tags.push({ type: 'text', label: '文本' });
+        tags.push({ type: 'text', label: 'Text' });
     }
     return tags;
 }
 
-// ========== 模型测试功能 ==========
+// ========== Model test functionality ==========
 function openTestPanel(model, name) {
     testPanel.classList.remove('hidden');
     testModelName.textContent = name + ' (' + model + ')';
     testModelName.dataset.model = model;
     testInput.value = '';
     testResult.className = 'test-result loading';
-    testResult.textContent = '等待发送...';
+    testResult.textContent = 'Waiting to send...';
     testSendBtn.disabled = false;
-    testSendBtn.textContent = '发送';
+    testSendBtn.textContent = 'Send';
 
-    // 自动滚动到测试面板
+    // Auto-scroll to the test panel
     testPanel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 
-    // 聚焦输入框
+    // Focus the input
     setTimeout(function () { testInput.focus(); }, 100);
 
-    addLog('打开测试面板: ' + name, 'info');
+    addLog('Test panel opened: ' + name, 'info');
 }
 
 if (testPanelClose) testPanelClose.addEventListener('click', function () {
@@ -680,7 +680,7 @@ if (testPanelClose) testPanelClose.addEventListener('click', function () {
 
 if (testSendBtn) testSendBtn.addEventListener('click', runTest);
 
-// Enter 发送（Shift+Enter 换行）
+// Enter to send (Shift+Enter for newline)
 if (testInput) testInput.addEventListener('keydown', function (e) {
     if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
@@ -697,11 +697,11 @@ async function runTest() {
         return;
     }
 
-    // UI 状态
+    // UI state
     testSendBtn.disabled = true;
-    testSendBtn.innerHTML = '<svg class="spin" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/></svg> 测试中';
+    testSendBtn.innerHTML = '<svg class="spin" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/></svg> Testing';
     testResult.className = 'test-result loading';
-    testResult.textContent = '\u27A1 \u6B63\u5728\u5411 ' + model + ' \u53D1\u9001\u8BF7\u6C42...\\n\\n(\u9700\u8981\u5148\u521B\u5EFA\u5E76\u767B\u554D\u6D4F\u89C8\u5668\u5B9E\u4F8B)';
+    testResult.textContent = '➡ Sending request to ' + model + '...\n\n(You need to create a browser instance and log in first)';
 
     console.log('[Renderer] runTest() → model:', model, 'message:', message);
 
@@ -709,20 +709,20 @@ async function runTest() {
         var result = await window.api.testModel(model, message);
         console.log('[Renderer] runTest ← success, content length:', (result.content || '').length);
         testResult.className = 'test-result';
-        testResult.textContent = result.content || '(\u7A7A\u54CD\u5E94)';
-        addLog('\u6A21\u578B\u6D4B\u8BD5\u6210\u529F: ' + result.model, 'info');
+        testResult.textContent = result.content || '(Empty response)';
+        addLog('Model test succeeded: ' + result.model, 'info');
     } catch (err) {
         console.error('[Renderer] runTest error:', err);
         testResult.className = 'test-result error';
-        testResult.textContent = '\u274C \u6D4B\u8BD5\u5931\u8D25\n\n' + (err && err.message ? err.message : String(err));
-        addLog('\u6A21\u578B\u6D4B\u8BD5\u5931\u8D25: ' + err.message, 'error');
+        testResult.textContent = '❌ Test failed\n\n' + (err && err.message ? err.message : String(err));
+        addLog('Model test failed: ' + err.message, 'error');
     } finally {
         testSendBtn.disabled = false;
-        testSendBtn.textContent = '\u53D1\u9001';
+        testSendBtn.textContent = 'Send';
     }
 }
 
-// ========== 浏览器实例列表 v4 — 事件委托 + 彻底修复关闭按钮 ==========
+// ========== Browser instance list v4 — event delegation + close button fixed for good ==========
 function renderBrowserList(instances) {
     var list = document.getElementById('browsers-list');
     if (!list) return;
@@ -730,25 +730,25 @@ function renderBrowserList(instances) {
     if (!instances || instances.length === 0) {
         list.innerHTML = '<div class="empty-state">' +
             '<svg viewBox="0 0 48 48" width="40" height="40" fill="none" stroke="currentColor" stroke-width="2" opacity=".35"><rect x="6" y="10" width="36" height="26" rx="4"/><line x1="18" y1="36" x2="30" y2="36"/><line x1="24" y1="30" x2="24" y2="36"/></svg>' +
-            '<p>暂无实例，点击右上角「新建实例」创建</p></div>';
+            '<p>No instances yet — click "New Instance" in the top-right corner</p></div>';
         list.removeAttribute('data-delegated');
         return;
     }
 
-    // 安全处理每个实例的 ID（确保是有限数字）
+    // Safely handle each instance's ID (ensure it's a finite number)
     list.innerHTML = instances.map(function (inst, idx) {
         var iid = inst.id;
         var numId = typeof iid === 'number' && isFinite(iid) ? iid : parseInt(iid, 10);
         if (!isFinite(numId)) numId = idx + 1;
 
         var statusClass = inst.status === 'active' ? 'active' : 'inactive';
-        var statusText = inst.status === 'active' ? '运行中' : '已停止';
+        var statusText = inst.status === 'active' ? 'Running' : 'Stopped';
         var timeStr = inst.createdAt
-            ? new Date(inst.createdAt).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+            ? new Date(inst.createdAt).toLocaleString('en-US', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
             : '—';
         var urlStr = (inst.url || 'arena.ai').replace(/^https?:\/\//, '').split('/')[0];
 
-        // 根据浏览器类型选择配色方案
+        // Pick the color scheme based on browser type
         var isEdge = inst.browserType === 'edge' || (inst.browserPath && inst.browserPath.toLowerCase().includes('edge'));
         var iconColor = isEdge ? '#0078D4' : '#4285F4';
 
@@ -765,7 +765,7 @@ function renderBrowserList(instances) {
                     '</svg>' +
                 '</div>' +
                 '<div class="browser-info">' +
-                    '<div class="browser-name">实例 #' + numId + (isEdge ? ' <small style="color:var(--text-tertiary);font-weight:400">Edge</small>' : '') + '</div>' +
+                    '<div class="browser-name">Instance #' + numId + (isEdge ? ' <small style="color:var(--text-tertiary);font-weight:400">Edge</small>' : '') + '</div>' +
                     '<div class="browser-meta">' +
                         '<span class="browser-url">' + esc(urlStr) + '</span>' +
                         '<span class="browser-sep">·</span>' +
@@ -778,14 +778,14 @@ function renderBrowserList(instances) {
                     '<span class="status-dot-inline" style="background:' + (inst.status === 'active' ? 'var(--success)' : 'var(--text-tertiary)') + ';box-shadow:0 0 4px ' + (inst.status === 'active' ? 'var(--success)44' : 'transparent') + '"></span>' +
                     statusText +
                 '</span>' +
-                '<button class="close-instance-btn" data-close-id="' + numId + '" title="关闭此实例">' +
+                '<button class="close-instance-btn" data-close-id="' + numId + '" title="Close this instance">' +
                     '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="4" y1="4" x2="12" y2="12"/><line x1="12" y1="4" x2="4" y2="12"/></svg>' +
                 '</button>' +
             '</div>' +
         '</div>';
     }).join('');
 
-    // ===== 事件委托：只绑定一次，innerHTML 重建后不受影响 =====
+    // ===== Event delegation: bound only once, unaffected by innerHTML rebuilds =====
     if (!list.getAttribute('data-delegated')) {
         list.setAttribute('data-delegated', 'true');
         list.addEventListener('click', function _closeDelegate(e) {
@@ -801,7 +801,7 @@ function renderBrowserList(instances) {
             var instanceId = parseInt(rawId, 10);
             if (!isFinite(instanceId)) {
                 console.error('[Renderer] Invalid instance ID:', rawId);
-                addLog('关闭失败：无效的实例 ID (' + rawId + ')', 'error');
+                addLog('Close failed: invalid instance ID (' + rawId + ')', 'error');
                 return;
             }
             closeInstance(instanceId);
@@ -810,7 +810,7 @@ function renderBrowserList(instances) {
     }
 }
 
-// 缓存最新的实例列表
+// Cache of the latest instance list
 var _cachedBrowserList = null;
 
 async function loadBrowsers() {
@@ -822,21 +822,21 @@ async function loadBrowsers() {
         return;
     }
 
-    list.innerHTML = '<div class="empty-state"><p>请使用「新建实例」按钮创建浏览器窗口</p></div>';
+    list.innerHTML = '<div class="empty-state"><p>Use the "New Instance" button to create a browser window</p></div>';
 }
 
-// 监听主进程推送的浏览器列表更新
+// Listen for browser list updates pushed by the main process
 window.api.onBrowserListUpdate(function (list) {
     _cachedBrowserList = list;
     renderBrowserList(list);
 });
 
-// 定期轮询检查实例状态（检测用户手动关闭的浏览器）
+// Periodically poll instance status (detect browsers closed manually by the user)
 setInterval(async function () {
     if (_cachedBrowserList && _cachedBrowserList.length > 0 && isServiceRunning) {
         try {
             var currentList = await window.api.getInstances();
-            // 如果数量变了说明有变化，更新显示
+            // A different count means something changed — update the display
             if (currentList && currentList.length !== _cachedBrowserList.length) {
                 _cachedBrowserList = currentList;
                 renderBrowserList(currentList);
@@ -845,7 +845,7 @@ setInterval(async function () {
     }
 }, 5000);
 
-// 关闭实例
+// Close an instance
 async function closeInstance(instanceId) {
     var item = document.querySelector('[data-instance-id="' + instanceId + '"]');
     if (item) {
@@ -855,9 +855,9 @@ async function closeInstance(instanceId) {
 
     try {
         var result = await window.api.closeBrowserInstance(instanceId);
-        addLog('实例 #' + instanceId + ' 已关闭，剩余 ' + (result.remaining || 0) + ' 个', 'info');
+        addLog('Instance #' + instanceId + ' closed, ' + (result.remaining || 0) + ' remaining', 'info');
     } catch (err) {
-        addLog('关闭实例失败: ' + err.message, 'error');
+        addLog('Failed to close instance: ' + err.message, 'error');
         if (item) {
             item.style.opacity = '';
             item.style.pointerEvents = '';
@@ -865,55 +865,55 @@ async function closeInstance(instanceId) {
     }
 }
 
-// 新建实例
+// Create a new instance
 if (createBrowserBtn) createBrowserBtn.addEventListener('click', async function () {
     try {
-        addLog('正在创建浏览器实例...', 'info');
+        addLog('Creating browser instance...', 'info');
         this.disabled = true;
-        this.innerHTML = '创建中...';
+        this.innerHTML = 'Creating...';
         await window.api.createBrowserInstance();
-        addLog('浏览器实例创建成功，请在新窗口完成登录验证', 'info');
+        addLog('Browser instance created — complete the login verification in the new window', 'info');
     } catch (err) {
-        addLog('创建失败: ' + err.message, 'error');
+        addLog('Creation failed: ' + err.message, 'error');
     } finally {
         this.disabled = false;
-        this.innerHTML = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg> 新建实例';
+        this.innerHTML = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg> New Instance';
     }
 });
 
-// ========== WebSocket 客户端管理 ==========
+// ========== WebSocket client management ==========
 var _cachedWsClients = null;
 
 function renderWsClientList(clients) {
     var list = document.getElementById('ws-clients-list');
     if (!list) return;
 
-    // 更新状态徽章
+    // Update the status badge
     var badge = document.getElementById('ws-status-badge');
     if (badge) {
         var dot = badge.querySelector('.status-dot');
         var txt = badge.querySelector('.status-text');
         if (clients && clients.length > 0) {
             dot.className = 'status-dot online';
-            txt.textContent = clients.length + ' 个已连接';
+            txt.textContent = clients.length + ' connected';
         } else {
             dot.className = 'status-dot offline';
-            txt.textContent = '未连接';
+            txt.textContent = 'Not Connected';
         }
     }
 
     if (!clients || clients.length === 0) {
         list.innerHTML = '<div class="empty-state">' +
             '<svg viewBox="0 0 48 48" width="40" height="40" fill="none" stroke="currentColor" stroke-width="2" opacity=".35"><circle cx="24" cy="24" r="20"/><path d="M16 24h16M24 16v16"/></svg>' +
-            '<p>暂无 WebSocket 客户端连接</p></div>';
+            '<p>No WebSocket clients connected</p></div>';
         return;
     }
 
     list.innerHTML = clients.map(function (c) {
         var statusClass = c.status === 'connected' ? 'active' : 'inactive';
-        var statusText = c.status === 'connected' ? '已连接' : '已断开';
+        var statusText = c.status === 'connected' ? 'Connected' : 'Disconnected';
         var timeStr = c.connectedAt
-            ? new Date(c.connectedAt).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+            ? new Date(c.connectedAt).toLocaleString('en-US', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
             : '—';
         var ipStr = (c.ip || '').replace('::ffff:', '');
 
@@ -928,12 +928,12 @@ function renderWsClientList(clients) {
                     '</svg>' +
                 '</div>' +
                 '<div class="browser-info">' +
-                    '<div class="browser-name">WS 客户端 #' + c.id + ' <small style="color:var(--text-tertiary);font-weight:400">油猴脚本</small></div>' +
+                    '<div class="browser-name">WS Client #' + c.id + ' <small style="color:var(--text-tertiary);font-weight:400">Tampermonkey</small></div>' +
                     '<div class="browser-meta">' +
                         '<span class="browser-url">' + esc(ipStr) + '</span>' +
                         '<span class="browser-sep">·</span>' +
                         '<span class="browser-time">' + timeStr + '</span>' +
-                        (c.activeRequests > 0 ? '<span class="browser-sep">·</span><span style="color:var(--accent)">请求中</span>' : '') +
+                        (c.activeRequests > 0 ? '<span class="browser-sep">·</span><span style="color:var(--accent)">Processing</span>' : '') +
                     '</div>' +
                 '</div>' +
             '</div>' +
@@ -955,30 +955,30 @@ async function loadWsClients() {
     } catch (e) {}
 }
 
-// 监听主进程推送的 WS 客户端列表更新
+// Listen for WS client list updates pushed by the main process
 window.api.onWsClientListUpdate(function (list) {
     _cachedWsClients = list;
     renderWsClientList(list);
 });
 
-// 模型列表从 WS 客户端更新时自动刷新
+// Auto-refresh when the model list is updated from a WS client
 if (window.api.onModelListUpdate) {
     window.api.onModelListUpdate(function (models) {
         if (models && models.length > 0) {
             renderModelList(models);
-            addLog('模型列表已从 WS 客户端更新: ' + models.length + ' 个', 'info');
+            addLog('Model list updated from WS client: ' + models.length + ' models', 'info');
         }
     });
 }
 
-// 切换到客户端管理页时也加载 WS 客户端
+// Also load WS clients when switching to the Clients tab
 var _origLoadBrowsers = loadBrowsers;
 loadBrowsers = function () {
     _origLoadBrowsers();
     loadWsClients();
 };
 
-// ========== 服务状态监听 — 联动按钮状态 ==========
+// ========== Service status listener — linked button states ==========
 window.api.onServiceStatus(function (st) {
     isServiceRunning = st.running;
     var ind = document.getElementById('service-status');
@@ -986,57 +986,57 @@ window.api.onServiceStatus(function (st) {
     var dot = ind.querySelector('.status-dot');
     var txt = ind.querySelector('.status-text');
     if (st.running) {
-        dot.className = 'status-dot online'; txt.textContent = '运行中';
-        addLog('服务已启动，监听端口 ' + (st.port || ''), 'info');
+        dot.className = 'status-dot online'; txt.textContent = 'Running';
+        addLog('Service started, listening on port ' + (st.port || ''), 'info');
 
-        // 启动后：禁用启动按钮，启用停止按钮
+        // After start: disable the start button, enable the stop button
         if (startBtn) {
             startBtn.classList.add('running');
             startBtn.disabled = true;
-            startBtn.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M8 5.14v13.72a1 1 0 001.5.86l11-6.86a1 1 0 000-1.72l-11-6.86A1 1 0 008 5.14z"/></svg> 运行中';
+            startBtn.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M8 5.14v13.72a1 1 0 001.5.86l11-6.86a1 1 0 000-1.72l-11-6.86A1 1 0 008 5.14z"/></svg> Running';
         }
         if (stopBtn) {
             stopBtn.classList.remove('stopped');
             stopBtn.disabled = false;
-            stopBtn.innerHTML = '<svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="5" width="10" height="14" rx="3"/></svg> 停止服务';
+            stopBtn.innerHTML = '<svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="5" width="10" height="14" rx="3"/></svg> Stop Service';
         }
     } else {
-        dot.className = 'status-dot offline'; txt.textContent = '未启动';
-        addLog('服务已停止', 'error');
+        dot.className = 'status-dot offline'; txt.textContent = 'Not Running';
+        addLog('Service stopped', 'error');
 
-        // 停止后：启用启动按钮，禁用停止按钮
+        // After stop: enable the start button, disable the stop button
         if (startBtn) {
             startBtn.classList.remove('running');
             startBtn.disabled = false;
-            startBtn.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M8 5.14v13.72a1 1 0 001.5.86l11-6.86a1 1 0 000-1.72l-11-6.86A1 1 0 008 5.14z"/></svg> 启动服务';
+            startBtn.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M8 5.14v13.72a1 1 0 001.5.86l11-6.86a1 1 0 000-1.72l-11-6.86A1 1 0 008 5.14z"/></svg> Start Service';
         }
         if (stopBtn) {
             stopBtn.classList.add('stopped');
             stopBtn.disabled = true;
-            stopBtn.innerHTML = '<svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="5" width="10" height="14" rx="3"/></svg> 停止服务';
+            stopBtn.innerHTML = '<svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="5" width="10" height="14" rx="3"/></svg> Stop Service';
         }
     }
 });
-window.api.onServiceError(function (err) { addLog('服务错误: ' + err, 'error'); });
+window.api.onServiceError(function (err) { addLog('Service error: ' + err, 'error'); });
 
-// ========== 请求劫持状态监听 ==========
+// ========== Request hijack status listener ==========
 window.api.onHijackStatus(function (data) {
     if (data.status === 'waiting_for_trigger' && testResult) {
         testResult.className = 'test-result loading';
-        if (data.message && data.message.includes('自动提交')) {
-            testResult.textContent = '⏳ 消息已填入浏览器输入框，正在自动提交并监听响应...\n\n若自动提交失败，请在浏览器中手动按 Enter。\n注意：应用选择的模型会替换浏览器中的模型。';
-        } else if (data.message && data.message.includes('已填入')) {
-            testResult.textContent = '⏳ 消息已填入浏览器输入框！\n\n请在 lmarena.ai 页面按 Enter 键发送，\n代理将自动劫持该请求并替换为测试内容。';
+        if (data.message && data.message.includes('auto-submit')) {
+            testResult.textContent = '⏳ The message has been filled into the browser input box — auto-submitting and listening for the response...\n\nIf auto-submit fails, press Enter manually in the browser.\nNote: the model selected in the app replaces the model in the browser.';
+        } else if (data.message && data.message.includes('filled')) {
+            testResult.textContent = '⏳ The message has been filled into the browser input box!\n\nPress Enter on the lmarena.ai page to send it —\nthe proxy will automatically hijack the request and replace it with the test content.';
         } else {
-            testResult.textContent = '⏳ 等待浏览器交互...\n\n请在 lmarena.ai 页面发送一条消息，\n代理将自动劫持该请求进行测试。';
+            testResult.textContent = '⏳ Waiting for browser interaction...\n\nSend any message on the lmarena.ai page —\nthe proxy will automatically hijack the request for testing.';
         }
     } else if (data.status === 'auto_submit_429' && testResult) {
         testResult.className = 'test-result loading';
-        testResult.textContent = '⚠️ 自动提交被 reCAPTCHA 拒绝 (429)\n\n请在 lmarena.ai 页面手动按 Enter 键发送消息，\n代理会使用你的真实交互来劫持请求。';
+        testResult.textContent = '⚠️ Auto-submit was rejected by reCAPTCHA (429)\n\nPress Enter manually on the lmarena.ai page to send the message —\nthe proxy will hijack the request using your real interaction.';
     }
 });
 
-// ========== 工具函数 ==========
+// ========== Utility functions ==========
 function esc(text) {
     if (!text) return '';
     var d = document.createElement('div');
@@ -1044,10 +1044,10 @@ function esc(text) {
     return d.innerHTML;
 }
 
-// ========== 初始化 ==========
+// ========== Initialization ==========
 (async function init() {
     await loadConfig();
-    addLog('应用就绪', 'info');
-    // 初始化时尝试加载模型列表
+    addLog('App ready', 'info');
+    // Try to load the model list on init
     loadModels();
 })();

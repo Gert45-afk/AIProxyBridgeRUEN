@@ -1,9 +1,9 @@
 /* ========================================
-   AI Proxy Bridge - 样式表 v3
-   全面升级：圆润丝滑 / 模型Logo / 实例管理 / 模型测试
+   AI Proxy Bridge - Stylesheet v3
+   Full upgrade: smooth & rounded / model logos / instance management / model testing
    ======================================== */
 
-/* ---------- CSS 变量 ---------- */
+/* ---------- CSS variables ---------- */
 :root {
     --bg-base: #f0f2f5;
     --bg-card: #ffffff;
@@ -38,12 +38,12 @@
     --radius-md: 12px;
     --radius-lg: 16px;
 
-    /* 标题栏 */
+    /* Title bar */
     --titlebar-bg: rgba(240,242,245,0.92);
     --titlebar-border: rgba(0,0,0,0.06);
 }
 
-/* 暗色主题 */
+/* Dark theme */
 body.theme-dark {
     --bg-base: #0d1117;
     --bg-card: #161b22;
@@ -93,7 +93,7 @@ body {
 
 .hidden { display: none !important; }
 
-/* ========== App 容器（全屏） =========== */
+/* ========== App container (fullscreen) =========== */
 .app-container {
     display: flex;
     flex-direction: column;
@@ -103,7 +103,7 @@ body {
 }
 
 /* ================================
-   自定义标题栏
+   Custom title bar
    ================================ */
 .titlebar {
     display: flex;
@@ -191,7 +191,7 @@ body {
 .action-icon:hover { background: var(--bg-hover); color: var(--text-primary); }
 
 /* ================================
-   标签导航 — 均匀分布
+   Tab navigation — evenly distributed
    ================================ */
 .tabs-nav {
     display: flex;
@@ -240,7 +240,7 @@ body {
 .tab-btn.active svg, .tab-btn:hover svg { opacity: 1; }
 
 /* ================================
-   主内容区
+   Main content area
    ================================ */
 .main-content {
     flex: 1;
@@ -288,7 +288,7 @@ body {
 }
 
 /* ================================
-   状态指示器
+   Status indicator
    ================================ */
 .status-indicator {
     display: inline-flex;
@@ -316,7 +316,7 @@ body {
 .status-dot.offline { background: var(--text-tertiary); }
 
 /* ================================
-   信息网格
+   Info grid
    ================================ */
 .info-grid {
     display: grid;
@@ -357,7 +357,7 @@ body {
 code { font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace; }
 
 /* ================================
-   按钮 — 圆润丝滑 v3
+   Buttons — smooth & rounded v3
    ================================ */
 .btn {
     display: inline-flex;
@@ -396,7 +396,7 @@ code { font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace; }
 .btn-sm { padding: 6px 14px; font-size: 12.5px; border-radius: 8px; }
 .btn-lg { padding: 10px 20px; font-size: 13px; border-radius: 10px; }
 
-/* Primary 按钮 */
+/* Primary button */
 .btn-primary {
     background: var(--accent);
     color: #fff;
@@ -409,7 +409,7 @@ code { font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace; }
     transform: translateY(-1px);
 }
 
-/* Danger Outline 按钮 */
+/* Danger Outline button */
 .btn-danger-outline {
     background: transparent;
     color: var(--danger);
@@ -421,7 +421,7 @@ code { font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace; }
     box-shadow: 0 2px 8px color-mix(in srgb, var(--danger) 12%, transparent);
 }
 
-/* Ghost 按钮 */
+/* Ghost button */
 .btn-ghost {
     background: var(--bg-elevated);
     color: var(--text-secondary);
@@ -433,7 +433,7 @@ code { font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace; }
     border-color: var(--border-default);
 }
 
-/* Danger 实心按钮（小） */
+/* Danger solid button (small) */
 .btn-danger-sm {
     padding: 5px 12px;
     font-size: 11.5px;
@@ -453,7 +453,7 @@ code { font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace; }
 }
 .btn-danger-sm:active { transform: scale(.95); }
 
-/* Icon only 按钮 */
+/* Icon-only button */
 .btn-icon-only {
     display: inline-flex;
     align-items: center;
@@ -469,7 +469,7 @@ code { font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace; }
 }
 .btn-icon-only:hover { background: var(--bg-hover); color: var(--text-primary); }
 
-/* 复制小按钮 */
+/* Small copy button */
 .copy-btn-sm {
     padding: 4px 10px;
     font-size: 11px;
@@ -491,7 +491,7 @@ code { font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace; }
 }
 .copy-btn-sm:active { transform: scale(.94); }
 
-/* 操作栏 */
+/* Action bar */
 .action-bar {
     display: flex;
     gap: 10px;
@@ -501,7 +501,7 @@ code { font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace; }
 }
 
 /* ================================
-   快速开始
+   Quick start
    ================================ */
 .quick-start-card { border: 1px solid var(--border-subtle); }
 .qs-header {
@@ -529,7 +529,7 @@ code { font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace; }
 }
 
 /* ================================
-   配置表单
+   Configuration form
    ================================ */
 .config-form-body { padding: 4px 24px 24px; }
 .form-row { display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 4px; }
@@ -612,7 +612,7 @@ code { font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace; }
 .switch-label input:checked + .switch-track .switch-thumb { transform: translateX(16px); }
 
 /* ================================
-   列表视图
+   List view
    ================================ */
 .list-view {
     max-height: 480px;
@@ -624,7 +624,7 @@ code { font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace; }
 .list-view::-webkit-scrollbar-thumb { background: var(--border-default); border-radius: 3px; }
 
 /* ================================
-   模型列表 v4 — 按厂商分组
+   Model list v4 — grouped by provider
    ================================ */
 .model-group {
     margin-bottom: 6px;
@@ -739,7 +739,7 @@ code { font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace; }
     color: var(--accent);
 }
 
-/* 模型能力标签 */
+/* Model capability tags */
 .model-chip-tags {
     display: inline-flex;
     gap: 3px;
@@ -763,7 +763,7 @@ code { font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace; }
 .model-tag.tag-thinking { color: #0891b2; background: #cffafe; }
 .model-tag.tag-code { color: #6366f1; background: #e0e7ff; }
 
-/* 模型 Logo（通用） */
+/* Model logo (generic) */
 .model-logo {
     border-radius: var(--radius-sm);
     display: flex;
@@ -788,7 +788,7 @@ code { font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace; }
 }
 
 /* ================================
-   测试面板 v4 — 简洁紧凑风格
+   Test panel v4 — clean, compact style
    ================================ */
 .test-panel {
     background: var(--bg-card);
@@ -962,7 +962,7 @@ code { font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace; }
     position: relative;
     overflow: hidden;
 }
-/* 加载动画 */
+/* Loading animation */
 .test-result.loading::after {
     content: '';
     display: block;
@@ -978,7 +978,7 @@ code { font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace; }
 }
 
 /* ================================
-   浏览器实例卡片 v3 — 带 Logo + 关闭按钮
+   Browser instance cards v3 — with logo + close button
    ================================ */
 .browser-item {
     display: flex;
@@ -1004,7 +1004,7 @@ code { font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace; }
     min-width: 0;
 }
 
-/* Chrome/浏览器 Logo 容器 */
+/* Chrome/browser logo container */
 .browser-icon-wrap {
     display: inline-flex;
     align-items: center;
@@ -1096,7 +1096,7 @@ code { font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace; }
     vertical-align: middle;
 }
 
-/* 关闭实例按钮 */
+/* Close instance button */
 .close-instance-btn {
     display: inline-flex;
     align-items: center;
@@ -1119,7 +1119,7 @@ code { font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace; }
 .close-instance-btn:active { transform: scale(.9); }
 
 /* ================================
-   空状态 & Loading
+   Empty state & loading
    ================================ */
 .empty-state {
     text-align: center;
@@ -1137,7 +1137,7 @@ code { font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace; }
 }
 
 /* ================================
-   Tips 提示框
+   Tips box
    ================================ */
 .tips-box {
     margin: 12px 8px 0;
@@ -1174,7 +1174,7 @@ code { font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace; }
 }
 
 /* ================================
-   日志控制台
+   Log console
    ================================ */
 .log-console {
     background: #0d1117;
@@ -1199,7 +1199,7 @@ body.theme-dark .log-console { background: #010409; }
 .log-entry.warning { border-left-color: #d29922; color: #e3b341; }
 
 /* ================================
-   帮助面板 (Modal)
+   Help panel (modal)
    ================================ */
 .modal-overlay {
     position: fixed;
@@ -1300,7 +1300,7 @@ body.theme-dark .tooltip { background: #374151; }
 .tooltip.show { opacity: 1; transform: translateY(0); }
 
 /* ================================
-   滚动条
+   Scrollbar
    ================================ */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
@@ -1308,7 +1308,7 @@ body.theme-dark .tooltip { background: #374151; }
 ::-webkit-scrollbar-thumb:hover { background: var(--text-tertiary); }
 
 /* ================================
-   加载旋转动画
+   Loading spin animation
    ================================ */
 .spin {
     animation: spin .8s linear infinite;
@@ -1317,7 +1317,7 @@ body.theme-dark .tooltip { background: #374151; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 /* ================================
-   服务状态联动 — 运行时禁用启动按钮，停止时禁用停止按钮
+   Service status interlock — disable the start button while running, disable the stop button while stopped
    ================================ */
 #start-service.running { opacity: .45; pointer-events: none; }
 #stop-service.stopped { opacity: .45; pointer-events: none; }
