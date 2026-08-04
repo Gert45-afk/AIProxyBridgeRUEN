@@ -1,7 +1,20 @@
 const puppeteer = require('puppeteer-core');
 const path = require('path');
+const os = require('os');
 const fs = require('fs').promises;
 const { execSync } = require('child_process');
+
+// Base directory for Chrome profiles.
+// In the packaged Electron app __dirname points inside app.asar (not writable),
+// so browser profiles must live in a real writable OS directory.
+function getProfilesBaseDir() {
+    try {
+        const { app } = require('electron');
+        return path.join(app.getPath('userData'), 'browser-profiles');
+    } catch (e) {
+        return path.join(os.homedir(), '.aiproxybridge', 'browser-profiles');
+    }
+}
 
 class BrowserManager {
     constructor() {
@@ -15,7 +28,8 @@ class BrowserManager {
     }
 
     async init() {
-        await fs.mkdir(this.scriptsPath, { recursive: true });
+        this.profilesDir = getProfilesBaseDir();
+        await fs.mkdir(this.profilesDir, { recursive: true });
         const chromePath = await this.findChromePath();
         if (!chromePath) {
             throw new Error(
@@ -497,7 +511,8 @@ class BrowserManager {
         }
         console.log(`[BrowserManager] Launching browser: ${chromePath}`);
 
-        const instanceProfileDir = path.join(this.scriptsPath, 'browser-profile-' + (this.browsers.length + 1));
+        const instanceProfileDir = path.join(this.profilesDir || getProfilesBaseDir(), 'browser-profile-' + (this.browsers.length + 1));
+        await fs.mkdir(instanceProfileDir, { recursive: true });
 
         const browser = await puppeteer.launch({
             executablePath: chromePath,
