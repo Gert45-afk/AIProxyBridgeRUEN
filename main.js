@@ -450,6 +450,23 @@ ipcMain.handle('create-browser-instance', async () => {
     return instance;
 });
 
+// Session cookies import (EditThisCookie JSON array — stored locally, applied to instances)
+ipcMain.handle('import-cookies', async (event, jsonText) => {
+    if (!browserManager) throw new Error('Service is not running — start the service first');
+    let parsed;
+    try {
+        parsed = typeof jsonText === 'string' ? JSON.parse(jsonText) : jsonText;
+    } catch (e) {
+        throw new Error('Invalid JSON: ' + e.message + ' — re-export the cookies fully (the text must end with }] )');
+    }
+    return browserManager.importCookies(parsed);
+});
+
+ipcMain.handle('get-cookies-status', async () => {
+    if (browserManager) return browserManager.getCookiesStatus();
+    return { count: 0 };
+});
+
 ipcMain.handle('stop-services', () => stopServices());
 
 ipcMain.handle('start-services', () => startServices());

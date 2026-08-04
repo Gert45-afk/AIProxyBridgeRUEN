@@ -881,6 +881,46 @@ if (createBrowserBtn) createBrowserBtn.addEventListener('click', async function 
     }
 });
 
+// ========== Session cookies import ==========
+var cookiesInput = document.getElementById('cookies-input');
+var importCookiesBtn = document.getElementById('import-cookies-btn');
+var cookiesStatus = document.getElementById('cookies-status');
+
+(async function refreshCookiesStatus() {
+    try {
+        var st = await window.api.getCookiesStatus();
+        if (cookiesStatus && st && st.count > 0) {
+            cookiesStatus.textContent = st.count + ' cookies stored';
+            cookiesStatus.className = 'cookies-status ok';
+        }
+    } catch (e) {}
+})();
+
+if (importCookiesBtn) importCookiesBtn.addEventListener('click', async function () {
+    var text = (cookiesInput.value || '').trim();
+    if (!text) {
+        cookiesStatus.textContent = 'Paste the cookies JSON first';
+        cookiesStatus.className = 'cookies-status err';
+        return;
+    }
+    try {
+        this.disabled = true;
+        this.textContent = 'Importing...';
+        var result = await window.api.importCookies(text);
+        cookiesStatus.textContent = 'Imported ' + result.imported + ' cookies, applied to ' + result.appliedTo + ' page(s)';
+        cookiesStatus.className = 'cookies-status ok';
+        addLog('Cookies imported: ' + result.imported + ' (applied to ' + result.appliedTo + ' page(s))', 'success');
+    } catch (err) {
+        var msg = err && err.message ? err.message : String(err);
+        cookiesStatus.textContent = 'Import failed: ' + msg;
+        cookiesStatus.className = 'cookies-status err';
+        addLog('Cookies import failed: ' + msg, 'error');
+    } finally {
+        this.disabled = false;
+        this.textContent = 'Import Cookies';
+    }
+});
+
 // ========== WebSocket client management ==========
 var _cachedWsClients = null;
 

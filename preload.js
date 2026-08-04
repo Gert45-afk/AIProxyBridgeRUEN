@@ -19,6 +19,10 @@ contextBridge.exposeInMainWorld('api', {
     closeBrowserInstance: (instanceId) => ipcRenderer.invoke('close-browser-instance', instanceId),
     getInstances: () => ipcRenderer.invoke('get-instances'),
 
+    // Session cookies
+    importCookies: (jsonText) => ipcRenderer.invoke('import-cookies', jsonText),
+    getCookiesStatus: () => ipcRenderer.invoke('get-cookies-status'),
+
     // WebSocket clients
     getWsClients: () => ipcRenderer.invoke('get-ws-clients'),
     refreshModelsWs: () => ipcRenderer.invoke('refresh-models-ws'),

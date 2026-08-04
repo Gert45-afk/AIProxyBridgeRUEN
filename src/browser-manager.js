@@ -30,6 +30,7 @@ class BrowserManager {
     async init() {
         this.profilesDir = getProfilesBaseDir();
         await fs.mkdir(this.profilesDir, { recursive: true });
+        await this.loadStoredCookies();
         const chromePath = await this.findChromePath();
         if (!chromePath) {
             throw new Error(
@@ -589,6 +590,12 @@ class BrowserManager {
             });
         });
 
+        // Apply stored session cookies so no manual login is needed
+        const appliedCookies = await this.applyCookiesToPage(page);
+        if (appliedCookies > 0) {
+            console.log(`[BrowserManager] Applied ${appliedCookies} stored cookies to the new instance`);
+        }
+
         // Navigate to LMArena (with retries; falls back to arena.ai)
         await this.navigateToArena(page, 45000);
         const landedUrl = page.url();
@@ -612,6 +619,84 @@ class BrowserManager {
         this.instanceInfos.push(instanceInfo);
         console.log(`[BrowserManager] Created instance #${instanceInfo.id}, URL: ${page.url()}`);
         return { browser, page, info: instanceInfo };
+    }
+
+    // ========== Session cookies (login bypass for browser instances) ==========
+    getCookiesFile() {
+        return path.join(this.profilesDir || getProfilesBaseDir(), 'cookies.json');
+    }
+
+    async loadStoredCookies() {
+        try {
+            const raw = await fs.readFile(this.getCookiesFile(), 'utf8');
+            const arr = JSON.parse(raw);
+            if (Array.isArray(arr)) this.cookies = arr;
+        } catch (e) {}
+    }
+
+    _mapCookiesForPuppeteer(cookies) {
+        const out = [];
+        for (const c of cookies) {
+            if (!c || !c.name || typeof c.value === 'undefined') continue;
+            let domain = String(c.domain || '').trim() || 'arena.ai';
+            if (!domain.endsWith('arena.ai') && !domain.endsWith('lmarena.ai')) continue;
+            const mapped = {
+                name: String(c.name),
+                value: String(c.value).replace(/&amp;/g, '&'),
+                domain,
+                path: c.path || '/',
+                httpOnly: !!c.httpOnly,
+                secure: !!c.secure
+            };
+            if (typeof c.expirationDate === 'number' && c.expirationDate > 0) {
+                mapped.expires = Math.floor(c.expirationDate);
+            }
+            const ss = String(c.sameSite || '').toLowerCase();
+            if (ss === 'lax') mapped.sameSite = 'Lax';
+            else if (ss === 'strict') mapped.sameSite = 'Strict';
+            else if (ss === 'no_restriction' || ss === 'none') mapped.sameSite = 'None';
+            out.push(mapped);
+        }
+        return out;
+    }
+
+    async applyCookiesToPage(page) {
+        if (!this.cookies || this.cookies.length === 0) return 0;
+        const mapped = this._mapCookiesForPuppeteer(this.cookies);
+        if (mapped.length === 0) return 0;
+        try {
+            await page.setCookie(...mapped);
+            return mapped.length;
+        } catch (e) {
+            console.log('[BrowserManager] setCookie note:', e.message);
+            return 0;
+        }
+    }
+
+    async importCookies(cookies) {
+        if (!Array.isArray(cookies)) throw new Error('Expected a JSON array of cookies (EditThisCookie export)');
+        const mapped = this._mapCookiesForPuppeteer(cookies);
+        if (mapped.length === 0) {
+            throw new Error('No usable arena.ai / lmarena.ai cookies found in the JSON');
+        }
+        this.cookies = cookies;
+        try { await fs.writeFile(this.getCookiesFile(), JSON.stringify(cookies, null, 2), 'utf8'); } catch (e) {}
+        let applied = 0;
+        for (const page of this.pages) {
+            try {
+                await page.setCookie(...mapped);
+                applied++;
+                await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
+            } catch (e) {
+                console.log('[BrowserManager] apply cookies note:', e.message);
+            }
+        }
+        console.log(`[BrowserManager] Imported ${mapped.length} arena cookies, applied to ${applied} page(s)`);
+        return { imported: mapped.length, appliedTo: applied };
+    }
+
+    getCookiesStatus() {
+        return { count: (this.cookies || []).length };
     }
 
     // ========== Model list management ==========
