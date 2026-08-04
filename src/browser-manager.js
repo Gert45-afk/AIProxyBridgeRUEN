@@ -3,6 +3,7 @@ const path = require('path');
 const os = require('os');
 const fs = require('fs').promises;
 const { execSync } = require('child_process');
+const { ARENA_EXEC_SOURCE, runArenaEvalInPage, parseArenaModelsHTML } = require('./arena-client');
 
 // Base directory for Chrome profiles.
 // In the packaged Electron app __dirname points inside app.asar (not writable),
@@ -23,20 +24,28 @@ class BrowserManager {
         this.instanceInfos = [];
         this.currentPageIndex = 0;
         this.models = [];
+        this.modelUuidMap = {};       // name/slug -> arena model UUID
+        this.initialModelAId = '';
+        this.headless = true;         // default: no browser windows (override via config)
+        this.cookies = [];
         this.scriptsPath = path.join(__dirname, '../scripts');
         this.cachedChromePath = null;
+        this._creatingInstance = null; // dedupe concurrent ensureInstance() calls
     }
 
-    async init() {
+    setOptions(opts) {
+        if (opts && typeof opts.headless === 'boolean') this.headless = opts.headless;
+    }
+
+    async init(opts) {
+        if (opts) this.setOptions(opts);
         this.profilesDir = getProfilesBaseDir();
         await fs.mkdir(this.profilesDir, { recursive: true });
         await this.loadStoredCookies();
         const chromePath = await this.findChromePath();
         if (!chromePath) {
-            throw new Error(
-                'Chrome/Edge browser not found!\n' +
-                'Please install Google Chrome or Microsoft Edge, or configure the browser path.'
-            );
+            console.warn('[BrowserManager] Chrome/Edge was NOT found. Puppeteer instances are unavailable; the Tampermonkey WebSocket client path will still work.');
+            return;
         }
         this.cachedChromePath = chromePath;
         console.log(`[BrowserManager] Using browser: ${chromePath}`);
@@ -137,382 +146,74 @@ class BrowserManager {
         return false;
     }
 
-    // ========== Core: send messages and get responses by driving the page UI ==========
+    // ========== Arena request execution (in-page fetch = real streaming) ==========
 
-    async handleChatCompletion(requestId, model, messages, onChunk) {
-        if (this.pages.length === 0) {
-            onChunk({ error: 'No browser instances available' });
-            return;
+    // Make sure the page is on arena.ai and run the evaluation inside it.
+    // push(evt) receives {t, s, d} events — resolves when the stream ends.
+    async executeArenaRequest(opts, push) {
+        const inst = await this.ensureInstance();
+        const page = inst.page;
+
+        const currentUrl = page.url() || '';
+        if (!currentUrl.includes('arena.ai') && !currentUrl.includes('lmarena.ai')) {
+            console.log('[BrowserManager] Page not on arena.ai — navigating...');
+            await this.navigateToArena(page, 30000);
+            await sleep(1500);
         }
 
-        const page = this.pages[this.currentPageIndex % this.pages.length];
-        this.currentPageIndex++;
+        // Wait for the arena executor (injected via evaluateOnNewDocument or on demand)
+        let done = false;
+        let resolved = false;
+        const finish = () => { if (!resolved) { resolved = true; done = true; } };
 
-        const lastUserMsg = messages.filter(m => m.role === 'user').pop();
-        const messageText = lastUserMsg ? lastUserMsg.content : 'Hello';
+        const wrappedPush = (evt) => {
+            try {
+                if (evt && evt.t === 'done') finish();
+                push(evt);
+            } catch (e) {}
+        };
 
-        console.log(`[BrowserManager] handleChatCompletion → model:${model}, msg:"${messageText.substring(0, 50)}"`);
+        // Watchdog: meta/retry events and stream data keep the request alive
+        const WATCHDOG_MS = 120000; // 2 min without any event → give up
+        let watchdog = setTimeout(() => {
+            wrappedPush({ t: 'error', s: 'timeout', d: 'No events from the page for 120 seconds' });
+            finish();
+        }, WATCHDOG_MS);
+        const petWatchdog = () => {
+            clearTimeout(watchdog);
+            watchdog = setTimeout(() => {
+                wrappedPush({ t: 'error', s: 'timeout', d: 'No events from the page for 120 seconds' });
+                finish();
+            }, WATCHDOG_MS);
+        };
+        const origPush = wrappedPush;
+        const alivePush = (evt) => { petWatchdog(); origPush(evt); };
 
-        try {
-            // 1. Make sure the page is on lmarena.ai
-            const currentUrl = page.url();
-            if (!currentUrl.includes('lmarena.ai') && !currentUrl.includes('arena.ai')) {
-                console.log('[BrowserManager] Navigating to lmarena.ai...');
-                await this.navigateToArena(page, 30000);
-                await sleep(2000);
-            }
-
-            // 2. Click "New Chat" or navigate to direct mode to start a new chat
-            await this.startNewChat(page);
-
-            // 3. Select the model (direct mode has a model selector)
-            await this.selectModel(page, model);
-
-            // 4. Type the message into the input box
-            await this.typeMessage(page, messageText);
-
-            // 5. Send the message
-            await this.sendMessage(page);
-
-            // 6. Wait for and extract the AI response
-            const content = await this.waitForResponse(page, requestId, model, onChunk);
-
-            if (!content || content.trim().length === 0) {
-                onChunk({ error: 'The model returned an empty response — make sure you are logged in to lmarena.ai and the model is available' });
-            }
-        } catch (e) {
-            console.error('[BrowserManager] handleChatCompletion failed:', e.message);
-            onChunk({ error: 'Execution failed: ' + e.message });
-        }
-    }
-
-    // Start a new chat
-    async startNewChat(page) {
-        try {
-            // Try to find the "New Chat" button
-            const clicked = await page.evaluate(() => {
-                const btns = [...document.querySelectorAll('button, a, [role="button"]')];
-                const newChatBtn = btns.find(el => {
-                    const text = (el.textContent || '').trim().toLowerCase();
-                    return text === 'new chat' || text.includes('new chat');
-                });
-                if (newChatBtn) {
-                    newChatBtn.click();
-                    return true;
-                }
-                return false;
-            });
-
-            if (clicked) {
-                console.log('[BrowserManager] Clicked "New Chat"');
-                await sleep(1000);
-            } else {
-                // Navigate to direct mode to start a new chat
-                await this.navigateToArena(page, 30000);
-                await sleep(2000);
-                console.log('[BrowserManager] Navigated to new chat');
-            }
-        } catch (e) {
-            console.log('[BrowserManager] startNewChat note:', e.message);
-        }
-    }
-
-    // Select a model
-    async selectModel(page, model) {
-        try {
-            const selected = await page.evaluate((targetModel) => {
-                // Method 1: select element
-                const selects = document.querySelectorAll('select');
-                for (const sel of selects) {
-                    const options = [...sel.options];
-                    for (const opt of options) {
-                        if (opt.value === targetModel ||
-                            opt.textContent.toLowerCase().includes(targetModel.toLowerCase())) {
-                            sel.value = opt.value;
-                            sel.dispatchEvent(new Event('change', { bubbles: true }));
-                            return true;
-                        }
-                    }
-                }
-
-                // Method 2: click the model selector button to open the dropdown
-                const btns = [...document.querySelectorAll('button, [role="button"], [role="combobox"]')];
-                const modelBtn = btns.find(el => {
-                    const text = (el.textContent || '').toLowerCase();
-                    // Find a button containing "model" or a known model name
-                    return text.includes('select model') || text.includes('choose model') || text.includes('direct');
-                });
-
-                if (modelBtn) {
-                    modelBtn.click();
-                    return 'opened_menu';
-                }
-
-                return false;
-            }, model);
-
-            if (selected === 'opened_menu') {
-                await sleep(500);
-                // Select the target model from the dropdown
-                await page.evaluate((targetModel) => {
-                    const items = [...document.querySelectorAll(
-                        '[role="option"], [role="listbox"] li, [role="menuitem"], ' +
-                        '[data-model], [data-model-id], [data-value], ' +
-                        '.dropdown-item, [class*="option"], [class*="item"]'
-                    )];
-                    const target = items.find(el => {
-                        const text = (el.textContent || '').toLowerCase();
-                        const val = (el.getAttribute('data-model') || el.getAttribute('data-model-id') || el.getAttribute('data-value') || '').toLowerCase();
-                        return text.includes(targetModel.toLowerCase()) || val === targetModel.toLowerCase();
-                    });
-                    if (target) target.click();
-                }, model);
-                await sleep(500);
-                console.log('[BrowserManager] Selected model:', model);
-            } else if (selected === true) {
-                console.log('[BrowserManager] Selected model via select:', model);
-            } else {
-                console.log('[BrowserManager] Model selector not found, using default');
-            }
-        } catch (e) {
-            console.log('[BrowserManager] selectModel note:', e.message);
-        }
-    }
-
-    // Type the message in the input box
-    async typeMessage(page, messageText) {
-        try {
-            // Wait for the input box to appear
-            await page.waitForSelector('textarea, [contenteditable="true"]', { timeout: 15000 });
-            await sleep(300);
-
-            // Clear the input box and type the message
-            await page.evaluate((text) => {
-                const textarea = document.querySelector('textarea') ||
-                                document.querySelector('[contenteditable="true"]');
-                if (!textarea) throw new Error('Input box not found');
-
-                // Focus it
-                textarea.focus();
-
-                if (textarea.tagName === 'TEXTAREA' || textarea.tagName === 'INPUT') {
-                    // Set the value in a React-compatible way
-                    const nativeSetter = Object.getOwnPropertyDescriptor(
-                        window.HTMLTextAreaElement.prototype, 'value'
-                    )?.set;
-                    if (nativeSetter) {
-                        nativeSetter.call(textarea, text);
-                    } else {
-                        textarea.value = text;
-                    }
-                    textarea.dispatchEvent(new Event('input', { bubbles: true }));
-                    textarea.dispatchEvent(new Event('change', { bubbles: true }));
-                } else if (textarea.getAttribute('contenteditable') === 'true') {
-                    textarea.textContent = text;
-                    textarea.dispatchEvent(new Event('input', { bubbles: true }));
-                }
-            }, messageText);
-
-            console.log('[BrowserManager] Message typed:', messageText.substring(0, 30) + '...');
-        } catch (e) {
-            throw new Error('Could not find an input box on the page: ' + e.message);
-        }
-    }
-
-    // Send the message
-    async sendMessage(page) {
-        try {
-            const sent = await page.evaluate(() => {
-                // Strategy 1: find the send button
-                const strategies = [
-                    () => document.querySelector('button[aria-label*="Send" i]'),
-                    () => document.querySelector('button[type="submit"]'),
-                    () => {
-                        // Find a button near the input box container
-                        const input = document.querySelector('textarea, [contenteditable="true"]');
-                        if (!input) return null;
-                        const form = input.closest('form') || input.parentElement?.parentElement;
-                        if (!form) return null;
-                        const btns = [...form.querySelectorAll('button')];
-                        return btns[btns.length - 1] || null;
-                    },
-                    () => {
-                        // Find a button with an SVG send icon
-                        const btns = [...document.querySelectorAll('button')];
-                        return btns.find(btn => {
-                            const svg = btn.querySelector('svg');
-                            if (!svg) return false;
-                            const html = svg.innerHTML.toLowerCase();
-                            return html.includes('send') || html.includes('paper') ||
-                                   html.includes('arrow') || html.includes('plane');
-                        }) || null;
-                    }
-                ];
-
-                for (const strategy of strategies) {
-                    try {
-                        const btn = strategy();
-                        if (btn) { btn.click(); return true; }
-                    } catch (e) {}
-                }
-                return false;
-            });
-
-            if (!sent) {
-                // Fallback: press Enter to send
-                await page.keyboard.press('Enter');
-                console.log('[BrowserManager] Used Enter to send');
-            } else {
-                console.log('[BrowserManager] Clicked send button');
-            }
-            await sleep(500);
-        } catch (e) {
-            try { await page.keyboard.press('Enter'); } catch (e2) {}
-            console.log('[BrowserManager] sendMessage fallback to Enter');
-        }
-    }
-
-    // Wait for the AI response (poll for DOM changes)
-    async waitForResponse(page, requestId, model, onChunk) {
-        return new Promise((resolve) => {
-            let lastContent = '';
-            let lastLength = 0;
-            let stableCount = 0;
-            let pollCount = 0;
-            const MAX_STABLE = 10;     // if content is unchanged 10 times in a row, consider it complete
-            const MIN_POLLS = 6;       // poll at least 6 times before judging completion
-            const POLL_INTERVAL = 600; // poll every 600ms
-
-            const timeout = setTimeout(() => {
-                cleanup();
-                resolve(lastContent || '');
-            }, 60000);
-
-            function cleanup() {
-                clearTimeout(timeout);
-                clearInterval(poller);
-            }
-
-            const poller = setInterval(async () => {
-                try {
-                    if (page.isClosed()) {
-                        cleanup();
-                        resolve(lastContent);
-                        return;
-                    }
-
-                    const result = await page.evaluate(() => {
-                        // Find the AI response text
-                        // Strategy 1: look for assistant/message-related DOM
-                        const selectors = [
-                            '[class*="assistant"] [class*="markdown"], [class*="assistant"] [class*="prose"]',
-                            '[class*="assistant"] [class*="message"], [class*="assistant"] [class*="content"]',
-                            '[class*="response"] [class*="markdown"], [class*="response"] [class*="prose"]',
-                            '[data-message-role="assistant"]',
-                            '[class*="message-content"]',
-                            '.markdown, .prose, article',
-                            '[class*="bot"] [class*="message"]',
-                            '[class*="ai-"] [class*="message"]',
-                        ];
-
-                        for (const sel of selectors) {
-                            const els = document.querySelectorAll(sel);
-                            if (els.length > 0) {
-                                // Take the last one (the newest response)
-                                const last = els[els.length - 1];
-                                const text = (last.innerText || last.textContent || '').trim();
-                                if (text.length > 2) return { text, found: true };
-                            }
-                        }
-
-                        // Strategy 2: find all message blocks, excluding user messages
-                        const allMsgs = document.querySelectorAll('[class*="message"], [class*="turn"], [class*="bubble"]');
-                        const texts = [];
-                        for (const msg of allMsgs) {
-                            const text = (msg.innerText || msg.textContent || '').trim();
-                            if (text.length > 5) texts.push(text);
-                        }
-                        if (texts.length >= 2) {
-                            // The last one is usually the AI response
-                            return { text: texts[texts.length - 1], found: true };
-                        }
-
-                        // Strategy 3: look for streaming/loading indicators
-                        const loading = document.querySelector(
-                            '[class*="loading"], [class*="typing"], [class*="streaming"], ' +
-                            '[class*="cursor"], [class*="blink"]'
-                        );
-                        if (loading) {
-                            return { text: '', found: false, loading: true };
-                        }
-
-                        return { text: '', found: false };
-                    });
-
-                    pollCount++;
-
-                    if (result.found && result.text.length > 0) {
-                        if (result.text.length > lastLength) {
-                            // Content grew — send the delta
-                            const delta = result.text.substring(lastLength);
-                            lastContent = result.text;
-                            lastLength = result.text.length;
-                            stableCount = 0;
-
-                            onChunk({
-                                id: requestId,
-                                object: 'chat.completion.chunk',
-                                created: Math.floor(Date.now() / 1000),
-                                model: model,
-                                choices: [{
-                                    index: 0,
-                                    delta: { content: delta },
-                                    finish_reason: null
-                                }]
-                            });
-                        } else {
-                            stableCount++;
-                        }
-
-                        // Check for completion
-                        if (stableCount >= MAX_STABLE && pollCount >= MIN_POLLS && lastContent.length > 0) {
-                            cleanup();
-                            onChunk({
-                                id: requestId,
-                                object: 'chat.completion.chunk',
-                                created: Math.floor(Date.now() / 1000),
-                                model: model,
-                                choices: [{ index: 0, delta: {}, finish_reason: 'stop' }]
-                            });
-                            console.log('[BrowserManager] Response complete, length:', lastContent.length);
-                            resolve(lastContent);
-                        }
-                    }
-
-                    // Detect errors
-                    if (pollCount > 5 && !lastContent) {
-                        const errorText = await page.evaluate(() => {
-                            const errEls = document.querySelectorAll('[class*="error"], [role="alert"]');
-                            for (const el of errEls) {
-                                const text = (el.textContent || '').trim();
-                                if (text.length > 5 && text.length < 300) return text;
-                            }
-                            return null;
-                        }).catch(() => null);
-                        if (errorText) {
-                            cleanup();
-                            onChunk({ error: 'Page error: ' + errorText });
-                            resolve('');
-                        }
-                    }
-                } catch (e) {
-                    if (e.message.includes('context was destroyed') || e.message.includes('Target closed')) {
-                        cleanup();
-                        resolve(lastContent);
-                    }
-                }
-            }, POLL_INTERVAL);
+        await runArenaEvalInPage(page, opts, alivePush).catch((e) => {
+            alivePush({ t: 'error', s: 'exec', d: e.message || String(e) });
+            alivePush({ t: 'done', s: opts.mode || 'direct', d: { failed: true } });
         });
+        clearTimeout(watchdog);
+    }
+
+    // Ensure at least one instance exists (lazy auto-create — used when cookies
+    // are imported and the user never clicked "New Instance")
+    async ensureInstance() {
+        for (let i = 0; i < this.pages.length; i++) {
+            const p = this.pages[i];
+            try { if (!p.isClosed()) return { page: p, index: i }; } catch (e) {}
+        }
+        if (this._creatingInstance) return this._creatingInstance;
+        this._creatingInstance = (async () => {
+            try {
+                console.log('[BrowserManager] No live instances — auto-creating a hidden one...');
+                const inst = await this.createInstance();
+                return { page: inst.page, index: this.pages.length - 1 };
+            } finally {
+                this._creatingInstance = null;
+            }
+        })();
+        return this._creatingInstance;
     }
 
     // ========== Browser instance creation ==========
@@ -523,28 +224,30 @@ class BrowserManager {
         if (!chromePath) {
             throw new Error('Cannot create browser instance: no usable browser (Chrome/Edge) found.');
         }
-        console.log(`[BrowserManager] Launching browser: ${chromePath}`);
+        console.log(`[BrowserManager] Launching browser: ${chromePath} (headless: ${this.headless})`);
 
         const instanceProfileDir = path.join(this.profilesDir || getProfilesBaseDir(), 'browser-profile-' + (this.browsers.length + 1));
         await fs.mkdir(instanceProfileDir, { recursive: true });
 
+        const launchArgs = [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--user-data-dir=' + instanceProfileDir,
+            '--disable-blink-features=AutomationControlled',
+        ];
+
         const browser = await puppeteer.launch({
             executablePath: chromePath,
-            headless: false,
-            args: [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--user-data-dir=' + instanceProfileDir,
-                '--disable-blink-features=AutomationControlled',
-            ],
-            defaultViewport: null,
+            headless: !!this.headless,
+            args: launchArgs,
+            defaultViewport: this.headless ? { width: 1280, height: 900 } : null,
             ignoreDefaultArgs: ['--enable-automation', '--disable-infobars'],
             ignoreHTTPSErrors: true
         });
 
         browser.on('disconnected', () => {
-            console.log('[BrowserManager] Browser disconnected (user closed it)');
+            console.log('[BrowserManager] Browser disconnected (closed)');
             const idx = this.browsers.indexOf(browser);
             if (idx !== -1) {
                 this.browsers.splice(idx, 1);
@@ -553,9 +256,6 @@ class BrowserManager {
                 console.log(`[BrowserManager] Auto-removed instance #${removed?.id}, ${this.instanceInfos.length} remaining`);
             }
         });
-
-        let page = null;
-        let pages = null;
 
         // Intercept chat.lmarena.ai redirect tabs
         browser.on('targetcreated', async (target) => {
@@ -573,22 +273,25 @@ class BrowserManager {
         });
 
         // Get the initial page
-        pages = await browser.pages();
-        page = pages[0] || await browser.newPage();
+        const pages = await browser.pages();
+        const page = pages[0] || await browser.newPage();
 
-        // Inject the anti-detection script
+        // Inject the anti-detection script + the arena executor
         await page.evaluateOnNewDocument(() => {
-            Object.defineProperty(navigator, 'webdriver', {
-                get: () => undefined,
-                configurable: true
-            });
-            window.chrome = window.chrome || {};
-            window.chrome.runtime = window.chrome.runtime || {};
-            Object.defineProperty(navigator, 'languages', {
-                get: () => ['en-US', 'en'],
-                configurable: true
-            });
+            try {
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: () => undefined,
+                    configurable: true
+                });
+                window.chrome = window.chrome || {};
+                window.chrome.runtime = window.chrome.runtime || {};
+                Object.defineProperty(navigator, 'languages', {
+                    get: () => ['en-US', 'en'],
+                    configurable: true
+                });
+            } catch (e) {}
         });
+        await page.evaluateOnNewDocument(ARENA_EXEC_SOURCE).catch(() => {});
 
         // Apply stored session cookies so no manual login is needed
         const appliedCookies = await this.applyCookiesToPage(page);
@@ -610,6 +313,7 @@ class BrowserManager {
             status: 'active',
             createdAt: new Date().toISOString(),
             url: page.url(),
+            headless: !!this.headless,
             browserPath: chromePath,
             browserType: chromePath.toLowerCase().includes('edge') ? 'edge' : 'chrome'
         };
@@ -703,113 +407,62 @@ class BrowserManager {
 
     async updateModels() {
         if (this.pages.length === 0) {
-            this.models = this.getDefaultModels();
+            if (this.models.length === 0) this.models = this.getDefaultModels();
             return;
         }
 
         const page = this.pages[0];
         try {
-            const pageUrl = page.url();
+            const pageUrl = page.url() || '';
             if (!pageUrl.includes('arena.ai') && !pageUrl.includes('lmarena.ai')) {
-                this.models = this.getDefaultModels();
+                if (this.models.length === 0) this.models = this.getDefaultModels();
                 return;
             }
 
-            // Method 1: extract the model list from the page JS context (most accurate, includes UUIDs)
+            // Method 1 (best): initialModels objects from RSC data — names, UUIDs and capabilities
             try {
-                const jsModels = await page.evaluate(() => {
-                    const results = [];
-                    try {
-                        // Model list in the Next.js page data
-                        const nextData = window.__NEXT_DATA__;
-                        if (nextData) {
-                            const jsonStr = JSON.stringify(nextData);
-                            // Extract the initialModels array
-                            const modelsMatch = jsonStr.match(/"initialModels"\s*:\s*(\[[\s\S]*?\])\s*,\s*"/);
-                            if (modelsMatch) {
-                                try {
-                                    const models = JSON.parse(modelsMatch[1]);
-                                    for (const m of models) {
-                                        if (typeof m === 'string') {
-                                            results.push({ id: m, name: m });
-                                        } else if (m && typeof m === 'object') {
-                                            const nm = m.publicName || m.name || m.displayName || m.slug || m.id;
-                                            const id = (m.id && !/^[0-9a-f]{8}-/.test(m.id)) ? m.id : (m.slug || nm);
-                                            if (id && nm) results.push({ id: String(id), name: String(nm), provider: m.organization || m.provider || '' });
-                                        }
-                                    }
-                                } catch (e) {}
-                            }
-                            // initialModels may also be a dict keyed by slug (values may hold uuid/publicName)
-                            if (results.length === 0) {
-                                const objMatch = jsonStr.match(/"initialModels"\s*:\s*(\{[\s\S]*?\})\s*,\s*"/);
-                                if (objMatch) {
-                                    try {
-                                        const obj = JSON.parse(objMatch[1]);
-                                        for (const [k, v] of Object.entries(obj)) {
-                                            const val = (v && typeof v === 'object') ? v : {};
-                                            const nm = val.publicName || val.name || k;
-                                            results.push({ id: /^[0-9a-f]{8}-/.test(k) ? String(nm) : k, name: String(nm), provider: val.organization || val.provider || '' });
-                                        }
-                                    } catch (e) {}
-                                }
-                            }
-                        }
-                    } catch (e) {}
-
-                    // Fallback: extract from the page DOM
-                    try {
-                        document.querySelectorAll('select option, [role="option"]').forEach(el => {
-                            const val = (el.value || el.getAttribute('data-value') || el.textContent || '').trim();
-                            const text = (el.textContent || '').trim();
-                            if (val && val.length >= 3 && val.length <= 80) {
-                                // Avoid duplicates
-                                if (!results.find(r => r.id === val || r.name === text)) {
-                                    results.push({ id: val, name: text || val });
-                                }
-                            }
-                        });
-                    } catch (e) {}
-
-                    const seen = new Set();
-                    return results.filter(m => {
-                        const key = m.id.toLowerCase();
-                        if (seen.has(key)) return false;
-                        seen.add(key);
-                        return true;
-                    });
-                });
-
-                if (jsModels.length > 0) {
-                    this.models = jsModels;
-                    console.log(`[BrowserManager] Extracted ${jsModels.length} models from page JS`);
+                const html = await page.content();
+                const parsed = parseArenaModelsHTML(html);
+                if (parsed.models.length > 0) {
+                    this.models = parsed.models;
+                    Object.assign(this.modelUuidMap, parsed.uuidMap);
+                    if (parsed.initialModelAId) this.initialModelAId = parsed.initialModelAId;
+                    console.log(`[BrowserManager] Extracted ${parsed.models.length} models (${Object.keys(parsed.uuidMap).length} UUID mappings) from RSC data`);
                     return;
                 }
             } catch (e) {}
 
-            // Method 2: parse from HTML
+            // Method 2: regex slug scan of the page HTML
             try {
                 const html = await page.content();
                 if (html && html.length > 1000) {
                     const parsedModels = this.parseModelsFromHTML(html);
                     if (parsedModels.length > 0) {
                         this.models = parsedModels;
-                        console.log(`[BrowserManager] Extracted ${parsedModels.length} models from page HTML`);
+                        console.log(`[BrowserManager] Extracted ${parsedModels.length} models from page HTML (slug scan)`);
                         return;
                     }
                 }
             } catch (e) {}
 
             // Final fallback
-            this.models = this.getDefaultModels();
+            if (this.models.length === 0) this.models = this.getDefaultModels();
         } catch (error) {
             console.error('[BrowserManager] updateModels error:', error.message);
-            this.models = this.getDefaultModels();
+            if (this.models.length === 0) this.models = this.getDefaultModels();
         }
     }
 
+    // Capabilities lookup (used to pick modality for image models)
+    getModelCapabilities(modelId) {
+        const m = (this.models || []).find(x =>
+            x.id === modelId || x.name === modelId ||
+            String(x.id).toLowerCase() === String(modelId).toLowerCase());
+        return m ? { outputs: m.outputs || [], inputs: m.inputs || [] } : { outputs: [], inputs: [] };
+    }
+
     getDefaultModels() {
-        // Updated April 2026 — covers common models on lmarena.ai
+        // Fallback list — shown until real data arrives from a client instance
         return [
             // OpenAI
             { id: 'chatgpt-4o-latest', name: 'ChatGPT-4o Latest' },

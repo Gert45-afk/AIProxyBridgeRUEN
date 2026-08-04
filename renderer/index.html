@@ -176,7 +176,24 @@
                         </div>
                         <small>Authentication credential for client connections — keep it safe</small>
                     </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="default-mode">Default chat mode</label>
+                            <select id="default-mode">
+                                <option value="direct">Direct chat (one model)</option>
+                                <option value="battle">Battle (two anonymous models)</option>
+                                <option value="side-by-side">Side-by-side (two chosen models)</option>
+                                <option value="agent">Agent mode (experimental)</option>
+                            </select>
+                            <small>Used when the request doesn't specify a mode via the model suffix</small>
+                        </div>
+                    </div>
                     <div class="form-options">
+                        <label class="switch-label">
+                            <input type="checkbox" id="headless-mode" checked>
+                            <span class="switch-track"><span class="switch-thumb"></span></span>
+                            Hidden instances (no browser window opens)
+                        </label>
                         <label class="switch-label">
                             <input type="checkbox" id="auto-start">
                             <span class="switch-track"><span class="switch-thumb"></span></span>
@@ -202,7 +219,7 @@
                 <div class="card-header">
                     <div class="header-info">
                         <h2>Available Models</h2>
-                        <p class="header-desc">AI models currently accessible through the proxy, with online testing</p>
+                        <p class="header-desc">AI models currently accessible through the proxy, with online testing. Streaming (<code>"stream": true</code>) and reasoning output are supported. Mode suffixes: <code>model~battle</code>, <code>modelA~vs~modelB</code>, <code>model~agent</code></p>
                     </div>
                     <button id="refresh-models" class="btn btn-ghost btn-sm">
                         <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6M2.5 22v-6h6"/><path d="M2.5 12a10 10 0 0 1 16.5-6.3L21.5 8M21.5 12a10 10 0 0 1-16.5 6.3L2.5 16"/></svg>
@@ -288,7 +305,7 @@
                 <div class="card-header">
                     <div class="header-info">
                         <h2>Browser Instances (Puppeteer)</h2>
-                        <p class="header-desc">Each instance maps to a separate LMArena session (prone to CAPTCHA checks, not recommended)</p>
+                        <p class="header-desc">Hidden by default — requests run inside them without any window opening. Import session cookies and you're set; a hidden instance is created automatically when needed</p>
                     </div>
                     <button id="create-browser" class="btn btn-primary btn-sm">
                         <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
@@ -307,11 +324,11 @@
                         Usage Notes
                     </div>
                     <ul>
-                        <li>Each browser instance is an independent session that doesn't interfere with others</li>
-                        <li>On first use, log in with Google in the popup browser window and complete verification</li>
+                        <li>Instances run <strong>hidden</strong> (see "Hidden instances" in Configuration) — no window pops up</li>
+                        <li>Simplest login: import session cookies below — a hidden instance is then created automatically on the first request</li>
+                        <li>Disable hidden mode and click "New Instance" only if you need to log in manually in a visible window</li>
                         <li>Multiple instances distribute requests round-robin for higher concurrency</li>
                         <li>If you hit rate limits (429), create a new instance to switch sessions</li>
-                        <li>Closing an instance also closes its browser window</li>
                     </ul>
                 </div>
                 <div class="tips-box cookies-box">
@@ -386,22 +403,32 @@
                 </ol>
             </div>
             <div class="help-section">
+                <h4>API features</h4>
+                <dl>
+                    <dt>Streaming</dt><dd><code>"stream": true</code> is fully supported — tokens arrive over SSE as <code>delta.content</code></dd>
+                    <dt>Reasoning ("thoughts")</dt><dd>Thinking models emit reasoning tokens as <code>delta.reasoning_content</code> in the stream, and as <code>message.reasoning_content</code> in non-streaming replies</dd>
+                    <dt>Chat modes</dt><dd>Picked per request via the model name: <code>model</code> = direct, <code>model~battle</code> = battle (two anonymous models), <code>modelA~vs~modelB</code> = side-by-side, <code>model~agent</code> = agent mode (experimental). You can also pass <code>"mode"</code> and <code>"modelB"</code> fields in the request body</dd>
+                    <dt>Two-model replies</dt><dd>Battle and side-by-side answers are labeled <code>**Model A:**</code> / <code>**Model B:**</code> in one message</dd>
+                    <dt>Images</dt><dd>Image models return a Markdown image with a signed CDN URL; the mode switches automatically based on model capabilities</dd>
+                </dl>
+            </div>
+            <div class="help-section">
                 <h4>Features</h4>
                 <dl>
                     <dt>Service Status</dt><dd>View, start and stop the proxy service, copy connection info</dd>
-                    <dt>Configuration</dt><dd>Change the port, API key and startup options</dd>
+                    <dt>Configuration</dt><dd>Change the port, API key, default chat mode and hidden-instance behavior</dd>
                     <dt>Models</dt><dd>Browse available AI models, test them online, and copy model IDs</dd>
-                    <dt>Clients</dt><dd>Manage LMArena session windows with multi-instance load balancing and per-instance closing</dd>
+                    <dt>Clients</dt><dd>WebSocket clients (Tampermonkey) and hidden Puppeteer instances with cookie import</dd>
                     <dt>Logs</dt><dd>View system logs in real time to troubleshoot issues</dd>
                 </dl>
             </div>
             <div class="help-section">
                 <h4>FAQ</h4>
                 <ul>
-                    <li><strong>"Chrome not found"?</strong> — Make sure Google Chrome is installed</li>
-                    <li><strong>429 errors (rate limit)?</strong> — You're sending requests too fast; create a new browser instance to switch sessions</li>
-                    <li><strong>Service won't start?</strong> — Check if the port is already in use; you can change it in Configuration</li>
-                    <li><strong>How to update?</strong> — Download the latest version from GitHub and install over the existing one</li>
+                    <li><strong>Empty replies?</strong> — Update the Tampermonkey script to v10, or import session cookies so a hidden instance can log in</li>
+                    <li><strong>429 errors (rate limit)?</strong> — The request is retried once automatically with a fresh reCAPTCHA token; if it persists, create a new instance to switch sessions</li>
+                    <li><strong>Service won't start?</strong> — Check if the port is already in use (quit other app copies from the tray); you can change it in Configuration</li>
+                    <li><strong>How to update?</strong> — git pull or download the latest version, then rebuild</li>
                 </ul>
             </div>
         </div>

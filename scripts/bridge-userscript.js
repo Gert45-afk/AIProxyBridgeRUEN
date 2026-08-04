@@ -1,143 +1,287 @@
-
 // ==UserScript==
-// @name         AI Proxy Bridge Client
-// @namespace    http://aiproxybridge/
-// @version      9.0
-// @description  Bridge between AI Proxy Bridge desktop app and LMArena (RSC parsing + UUIDv7)
-// @match        https://lmarena.ai/*
-// @match        https://*.lmarena.ai/*
+// @name         arena
+// @namespace    http://tampermonkey.net/
+// @version      10.0
+// @description  LMArena API - WebSocket client for AI Proxy Bridge (direct in-page fetch + streaming + reasoning)
+// @author       abc
 // @match        https://arena.ai/*
 // @match        https://*.arena.ai/*
+// @match        https://lmarena.ai/*
+// @match        https://*.lmarena.ai/*
+// @icon         https://www.google.com/s2/favicons?sz=64&domain=arena.ai
 // @connect      localhost
 // @connect      127.0.0.1
 // @grant        none
 // @run-at       document-end
 // ==/UserScript==
 
-(function() {
+(function () {
     'use strict';
 
     const SERVER_URL = "ws://127.0.0.1:61001/ws";
     let socket;
-    const activeRequests = new Map();
+    const activeRequests = new Set();
 
-    let modelUuidMap = {};
+    // ========== Model UUID mapping ==========
+    let modelUuidMap = {};        // { "gpt-4o": "019a98f7-...", ... }
     let modelDisplayNameMap = {};
     let uuidToSlugMap = {};
     let modelSlugList = [];
+    let modelCapsMap = {};        // slug -> { outputs: [...], inputs: [...] }
     let initialModelAId = '';
 
-    let capturedRequestTemplate = null;
-    let capturedDirectTemplate = null;
-    let capturedArenaTemplate = null;
+    // ============================================================================
+    // SYNC-WITH-ARENA-CLIENT — inline copy of arenaExecFactory from
+    // src/arena-client.js (Tampermonkey cannot require() files). Keep in sync.
+    // ============================================================================
+    function arenaExecFactory() {
+        'use strict';
 
-    // Request hijack
-    let pendingHijack = null;
-
-    const originalFetch = window.fetch;
-    window.fetch = async function (...args) {
-        const urlArg = args[0];
-        let urlString = '';
-        if (urlArg instanceof Request) { urlString = urlArg.url; }
-        else if (urlArg instanceof URL) { urlString = urlArg.href; }
-        else if (typeof urlArg === 'string') { urlString = urlArg; }
-
-        // Diagnostics: log API-related fetch calls
-        if (urlString && (urlString.includes('evaluation') || urlString.includes('api') || urlString.includes('stream'))) {
-            const shortUrl = urlString.substring(0, 150);
-            console.log(`[AI Proxy Bridge] FETCH: ${shortUrl} | pendingHijack=${!!pendingHijack}`);
-            fetchLog.push(shortUrl);
-            if (fetchLog.length > 50) fetchLog.shift();
+        function uuid7() {
+            const ts = BigInt(Date.now());
+            const randA = BigInt(Math.floor(Math.random() * 0x1000));
+            const randB = BigInt(Math.floor(Math.random() * 0x3ffffffffffff));
+            const uuidInt = (ts << 80n) | ((BigInt(0x7000) | (randA & 0x0fffn)) << 64n) | (0x8000000000000000n | randB);
+            const h = uuidInt.toString(16).padStart(32, '0');
+            return h.slice(0, 8) + '-' + h.slice(8, 12) + '-' + h.slice(12, 16) + '-' + h.slice(16, 20) + '-' + h.slice(20);
         }
 
-        if (urlString && urlString.includes('create-evaluation') && !window.isProxyRequest) {
+        function findRecaptchaSiteKey() {
             try {
-                const options = args[1] || {};
-                const headers = {};
-                if (options.headers) {
-                    if (options.headers instanceof Headers) { options.headers.forEach((v, k) => { headers[k] = v; }); }
-                    else if (typeof options.headers === 'object') { Object.assign(headers, options.headers); }
+                const scripts = document.querySelectorAll('script[src]');
+                for (const s of scripts) {
+                    const src = s.src || '';
+                    if (src.indexOf('recaptcha') === -1) continue;
+                    const m = src.match(/[?&](?:render|k)=([A-Za-z0-9_-]{20,})/);
+                    if (m) return m[1];
                 }
-                let body = null;
-                if (options.body) { try { body = JSON.parse(options.body); } catch(e) { body = options.body; } }
-                const contentType = headers['content-type'] || headers['Content-Type'] || 'application/json';
+            } catch (e) {}
+            return '6LeTGMcsAAAAALuIlkVwIxaAuZA8VledA6d3Nnb0';
+        }
 
-                capturedRequestTemplate = { url: urlString, headers, body, contentType };
-                if (body && body.recaptchaV3Token) window.recaptchaToken = body.recaptchaV3Token;
+        async function mintRecaptcha(action) {
+            try {
+                const g = window.grecaptcha;
+                if (!g || !g.enterprise || typeof g.enterprise.execute !== 'function') return '';
+                const key = findRecaptchaSiteKey();
+                return await new Promise((resolve) => {
+                    let settled = false;
+                    const done = (v) => { if (!settled) { settled = true; resolve(v || ''); } };
+                    setTimeout(() => done(''), 15000);
+                    try {
+                        g.enterprise.ready(() => {
+                            g.enterprise.execute(key, { action: action || 'chat_submit' })
+                                .then(done)
+                                .catch(() => done(''));
+                        });
+                    } catch (e) { done(''); }
+                });
+            } catch (e) { return ''; }
+        }
 
-                // Request hijack
-                if (pendingHijack && body && typeof body === 'object') {
-                    const hijack = pendingHijack;
-                    pendingHijack = null;
-                    console.log(`[AI Proxy Bridge] HIJACKING page request: modelAId=${body.modelAId} → ${hijack.modelAId}`);
+        function buildBody(opts) {
+            const body = {
+                id: uuid7(),
+                mode: opts.mode || 'direct',
+                userMessageId: uuid7(),
+                modelAMessageId: uuid7(),
+                userMessage: {
+                    content: String(opts.content || ''),
+                    experimental_attachments: [],
+                    metadata: {}
+                },
+                modality: opts.modality || 'chat',
+                recaptchaV3Token: opts.recaptchaToken || ''
+            };
+            if (opts.modelAId) body.modelAId = opts.modelAId;
+            if (opts.modelBId) body.modelBId = opts.modelBId;
+            if (body.mode === 'side-by-side' || body.mode === 'battle') {
+                body.modelBMessageId = uuid7();
+                if (!body.userMessage.modelIds) body.userMessage.modelIds = undefined;
+            }
+            if (body.mode === 'battle') {
+                delete body.modelAId;
+                delete body.modelBId;
+            }
+            return body;
+        }
 
-                    body.modelAId = hijack.modelAId;
-                    body.mode = 'direct';
-                    if (body.userMessage) body.userMessage.content = hijack.content;
-                    delete body.modelBId;
-                    delete body.modelBMessageId;
-                    options.body = JSON.stringify(body);
-                    args[1] = options;
+        function payloadToText(v) {
+            if (v == null) return '';
+            if (typeof v === 'string') return v;
+            for (const k of ['thinking', 'thought', 'reasoning', 'text', 'content', 'delta']) {
+                if (typeof v[k] === 'string' && v[k]) return v[k];
+            }
+            try { return JSON.stringify(v); } catch (e) { return String(v); }
+        }
 
-                    const hijackedResponse = await originalFetch.apply(this, args);
+        function parseStreamLine(line, push) {
+            if (!line || !line.trim()) return;
+            const ci = line.indexOf(':');
+            if (ci <= 0 || ci > 3) return;
+            const tag = line.slice(0, ci);
+            const raw = line.slice(ci + 1);
+            let val;
+            try { val = JSON.parse(raw); } catch (e) { val = raw; }
 
-                    // 429: rejected by reCAPTCHA — don't clear pendingHijack, allow manual retry
-                    if (hijackedResponse.status === 429) {
-                        console.warn('[AI Proxy Bridge] Hijacked request got 429 — reCAPTCHA rejected');
-                        hijack.autoSubmitted = true;
-                        if (socket && socket.readyState === WebSocket.OPEN) {
-                            socket.send(JSON.stringify({
-                                type: 'status',
-                                data: { status: 'auto_submit_429', requestId: hijack.requestId, message: 'Auto-submit was rejected by reCAPTCHA — press Enter manually in the browser to send the message' }
-                            }));
+            switch (tag) {
+                case 'a0': {
+                    const t = payloadToText(val);
+                    if (t === 'hasArenaError') { push({ t: 'error', s: 'arena', d: 'hasArenaError (arena rejected the request — the model may be temporarily unavailable)' }); return; }
+                    if (t) push({ t: 'text', s: 'a', d: t });
+                    return;
+                }
+                case 'b0': { const t = payloadToText(val); if (t) push({ t: 'text', s: 'b', d: t }); return; }
+                case 'ag': { const t = payloadToText(val); if (t) push({ t: 'reasoning', s: 'a', d: t }); return; }
+                case 'bg': { const t = payloadToText(val); if (t) push({ t: 'reasoning', s: 'b', d: t }); return; }
+                case 'ad': { push({ t: 'finish', s: 'a', d: (val && typeof val === 'object') ? val : {} }); return; }
+                case 'bd': { push({ t: 'finish', s: 'b', d: (val && typeof val === 'object') ? val : {} }); return; }
+                case 'a2':
+                case 'b2': {
+                    try {
+                        const arr = Array.isArray(val) ? val : [val];
+                        for (const item of arr) {
+                            if (!item || typeof item !== 'object') continue;
+                            if (item.type === 'heartbeat') continue;
+                            if (item.image) push({ t: 'image', s: tag === 'a2' ? 'a' : 'b', d: item.image });
                         }
-                        return new Response('', { status: 200, headers: { 'Content-Type': 'text/plain' } });
+                    } catch (e) {}
+                    return;
+                }
+                case 'a3': { push({ t: 'error', s: 'a', d: payloadToText(val) }); return; }
+                case 'b3': { push({ t: 'error', s: 'b', d: payloadToText(val) }); return; }
+                case '0': {
+                    const t = payloadToText(val);
+                    if (t) push({ t: 'text', s: 'a', d: t });
+                    return;
+                }
+                default: return;
+            }
+        }
+
+        async function attempt(opts, push) {
+            const base = opts.base || location.origin;
+            const url = base.replace(/\/$/, '') + '/nextjs-api/stream/create-evaluation';
+            const resp = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
+                body: JSON.stringify(opts.body)
+            });
+            if (!resp.ok) {
+                let snippet = '';
+                try { snippet = (await resp.text()).slice(0, 300); } catch (e) {}
+                const err = new Error('HTTP ' + resp.status + (snippet ? ' — ' + snippet : ''));
+                err.status = resp.status;
+                throw err;
+            }
+            if (!resp.body) {
+                const text = await resp.text();
+                for (const line of text.split('\n')) parseStreamLine(line, push);
+                return;
+            }
+            const reader = resp.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+            for (;;) {
+                const r = await reader.read();
+                if (r.done) break;
+                buffer += decoder.decode(r.value, { stream: true });
+                const lines = buffer.split('\n');
+                buffer = lines.pop() || '';
+                for (const line of lines) parseStreamLine(line, push);
+            }
+            if (buffer.trim()) parseStreamLine(buffer, push);
+        }
+
+        async function run(opts, push) {
+            push = (typeof push === 'function') ? push : () => {};
+            opts = opts || {};
+            let mode = opts.mode || 'direct';
+            let lastError = null;
+
+            const modeChain = (mode === 'direct') ? ['direct', 'direct-battle'] : [mode];
+
+            for (let m = 0; m < modeChain.length; m++) {
+                mode = modeChain[m];
+                for (let retry = 0; retry < 2; retry++) {
+                    try {
+                        const token = await mintRecaptcha('chat_submit');
+                        const body = buildBody({
+                            mode: mode,
+                            modelAId: opts.modelAId || '',
+                            modelBId: opts.modelBId || '',
+                            content: opts.content || '',
+                            modality: opts.modality || 'chat',
+                            recaptchaToken: token
+                        });
+                        push({ t: 'meta', s: 'request', d: { mode: body.mode, modelAId: body.modelAId || '', modelBId: body.modelBId || '', modality: body.modality, hasToken: !!token, attempt: retry + 1 } });
+                        await attempt({ base: opts.base, body: body }, push);
+                        push({ t: 'done', s: mode, d: { mode: body.mode, sessionId: body.id } });
+                        return;
+                    } catch (e) {
+                        lastError = e;
+                        const st = e && e.status;
+                        if ((st === 429 || st === 403 || st === 503) && retry === 0) {
+                            push({ t: 'meta', s: 'retry', d: { reason: 'HTTP ' + st, retry: retry + 1 } });
+                            await new Promise(r => setTimeout(r, 1500));
+                            continue;
+                        }
+                        if ((st === 400 || st === 404 || st === 405 || st === 422) && m < modeChain.length - 1) {
+                            break;
+                        }
+                        push({ t: 'error', s: 'http', d: e.message || String(e) });
                     }
-
-                    // Non-429: hijack succeeded
-                    pendingHijack = null;
-                    (async () => {
-                        try {
-                            await handleStream(hijackedResponse, hijack.requestId);
-                            hijack.resolve(true);
-                        } catch (e) {
-                            console.error(`[AI Proxy Bridge] Hijacked stream error:`, e.message);
-                            sendToServer(hijack.requestId, { error: e.message });
-                            hijack.resolve(false);
-                        }
-                    })();
-                    return new Response('', { status: 200, headers: { 'Content-Type': 'text/plain' } });
                 }
+            }
+            if (lastError) push({ t: 'error', s: 'http', d: 'All attempts failed, last error: ' + (lastError.message || String(lastError)) });
+            push({ t: 'done', s: mode, d: { mode: mode, failed: true } });
+        }
 
-                // Extract modelAId from the captured request
+        return { run: run, mintRecaptcha: mintRecaptcha, uuid7: uuid7, buildBody: buildBody };
+    }
+    // ============================================================================
+    // END SYNC-WITH-ARENA-CLIENT
+    // ============================================================================
+
+    const arenaExec = arenaExecFactory();
+
+    // ========== Fetch tap: capture model UUIDs + reCAPTCHA tokens from real page traffic ==========
+    const originalFetch = window.fetch;
+    window.fetch = async function (...args) {
+        try {
+            const urlArg = args[0];
+            const urlString = urlArg instanceof Request ? urlArg.url
+                : urlArg instanceof URL ? urlArg.href
+                : (typeof urlArg === 'string' ? urlArg : '');
+            if (urlString && urlString.includes('create-evaluation') && !window.isProxyRequest) {
+                const options = args[1] || {};
+                let body = null;
+                if (options.body) { try { body = JSON.parse(options.body); } catch (e) {} }
+                if (body && body.recaptchaV3Token) window.recaptchaToken = body.recaptchaV3Token;
                 if (body && body.modelAId && /^[0-9a-f]{8}-/i.test(body.modelAId)) {
-                    console.log(`[AI Proxy Bridge] Captured modelAId UUID: ${body.modelAId}`);
                     addModelMapping('captured-modelAId', body.modelAId, 'Captured Model');
                     tryCaptureModelSelection(body.modelAId);
                 }
-
-                const isDirectMode = body && body.mode === 'direct';
-                if (isDirectMode) {
-                    capturedDirectTemplate = capturedRequestTemplate;
-                    console.log('[AI Proxy Bridge] Captured DIRECT:', { modelAId: body.modelAId || 'N/A', mode: body.mode });
-                } else {
-                    capturedArenaTemplate = capturedRequestTemplate;
-                    console.log('[AI Proxy Bridge] Captured ARENA');
-                }
-                sendApiInfoToServer();
-            } catch (e) { console.error('[AI Proxy Bridge] Capture error:', e); }
-        }
+            }
+        } catch (e) {}
         return originalFetch.apply(this, args);
     };
 
+    // ========== Add model mapping ==========
     function addModelMapping(slug, uuid, displayName) {
         if (!slug || !uuid) return;
         modelUuidMap[slug] = uuid;
         modelUuidMap[slug.toLowerCase()] = uuid;
-        if (displayName) { modelDisplayNameMap[displayName] = uuid; modelDisplayNameMap[displayName.toLowerCase()] = uuid; }
+        if (displayName) {
+            modelDisplayNameMap[displayName] = uuid;
+            modelDisplayNameMap[displayName.toLowerCase()] = uuid;
+        }
         uuidToSlugMap[uuid] = slug;
+        uuidToSlugMap[uuid.toLowerCase()] = slug;
     }
 
+    // ========== Try to capture the currently selected model from the page ==========
     function tryCaptureModelSelection(modelAId) {
         try {
             const selectedOption = document.querySelector('div[cmdk-item][role="option"][aria-selected="true"]');
@@ -146,10 +290,11 @@
                 if (nameSpan) {
                     const name = nameSpan.textContent.trim();
                     if (name) {
+                        addModelMapping(name, modelAId, name);
                         const slug = name.toLowerCase().replace(/[\s.]+/g, '-').replace(/[()]+/g, '');
                         addModelMapping(slug, modelAId, name);
-                        addModelMapping(name, modelAId, name);
-                        console.log(`[AI Proxy Bridge] Mapped "${name}" → ${modelAId}`);
+                        console.log(`[LMArena API] Mapped model "${name}" → ${modelAId}`);
+                        return;
                     }
                 }
             }
@@ -157,40 +302,34 @@
             if (comboBtn) {
                 const btnText = comboBtn.textContent.trim();
                 if (btnText && btnText.length > 2 && btnText.length < 60) {
+                    addModelMapping(btnText, modelAId, btnText);
                     const slug = btnText.toLowerCase().replace(/[\s.]+/g, '-').replace(/[()]+/g, '');
                     addModelMapping(slug, modelAId, btnText);
-                    addModelMapping(btnText, modelAId, btnText);
-                    console.log(`[AI Proxy Bridge] Mapped combobox "${btnText}" → ${modelAId}`);
                 }
             }
         } catch (e) {}
     }
 
-    // UUIDv7 generation (BigInt precision; the server validates the timestamp)
-    function uuid7() {
-        const ts = BigInt(Date.now());
-        const randA = BigInt(Math.floor(Math.random() * 0x1000));
-        const randB = BigInt(Math.floor(Math.random() * 0x3ffffffffffff));
-        const uuid_int = (ts << 80n) | (BigInt(0x7000) | (randA & 0x0fffn)) << 64n | (0x8000000000000000n | randB);
-        const h = uuid_int.toString(16).padStart(32, '0');
-        return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20)}`;
+    // ========== Model slug patterns (shared by all extractors) ==========
+    const MODEL_SLUG_ALT = 'claude-[a-z0-9._\\-]+|gpt-[a-z0-9._\\-]+|chatgpt-[a-z0-9._\\-]+|gpt-oss-[a-z0-9._\\-]+|o[0-9]+(?:-[a-z0-9._\\-]+)?|gemini-[a-z0-9._\\-]+|gemma-[a-z0-9._\\-]+|imagen-[a-z0-9._\\-]+|veo-[a-z0-9._\\-]+|nano-banana[a-z0-9._\\-]*|llama-[a-z0-9._\\-]+|meta-llama[a-z0-9._\\-]*|deepseek-[a-z0-9._\\-]+|qwen[a-z0-9._\\-]*|qwq[a-z0-9._\\-]*|mistral-[a-z0-9._\\-]+|mixtral[a-z0-9._\\-]*|pixtral[a-z0-9._\\-]*|ministral[a-z0-9._\\-]*|codestral[a-z0-9._\\-]*|devstral[a-z0-9._\\-]*|grok[a-z0-9._\\-]*|glm-[a-z0-9._\\-]+|chatglm[0-9][a-z0-9._\\-]*|ernie-[a-z0-9._\\-]+|kimi[a-z0-9._\\-]*|moonshot-[a-z0-9._\\-]+|phi-[a-z0-9._\\-]+|phi[0-9][a-z0-9._\\-]*|nova-[a-z0-9._\\-]+|command-[a-z0-9._\\-]+|c4ai-[a-z0-9._\\-]+|aya-[a-z0-9._\\-]+|jamba-[a-z0-9._\\-]+|mercury-[a-z0-9._\\-]*|hunyuan-[a-z0-9._\\-]+|abab[0-9][a-z0-9._\\-]*|minimax-[a-z0-9._\\-]+|mimo-[a-z0-9._\\-]+|step-[a-z0-9._\\-]+|skywork-[a-z0-9._\\-]+|seedream[a-z0-9._\\-]*|wan[0-9][a-z0-9._\\-]*|flux[a-z0-9._\\-]*|ideogram[a-z0-9._\\-]*|longcat-[a-z0-9._\\-]+|dots[.-][a-z0-9._\\-]+|solar-[a-z0-9._\\-]+|lfm[a-z0-9._\\-]*|exaone[a-z0-9._\\-]*|trinity-[a-z0-9._\\-]+|sonar-[a-z0-9._\\-]+|rwkv[0-9][a-z0-9._\\-]*|internlm[a-z0-9._\\-]*|internvl[a-z0-9._\\-]*|yi-[a-z0-9._\\-]+|dall-e-[a-z0-9._\\-]+|dbrx[a-z0-9._\\-]*|vicuna-[a-z0-9._\\-]+|pplx-[a-z0-9._\\-]+|mpt-[a-z0-9._\\-]+|reka-[a-z0-9._\\-]+|nemotron[a-z0-9._\\-]*|falcon[0-9][a-z0-9._\\-]*|aurora[a-z0-9._\\-]*|recraft[a-z0-9._\\-]*|stable-[a-z0-9._\\-]+|sdxl[a-z0-9._\\-]*|mamba-[a-z0-9._\\-]+|kat-[a-z0-9._\\-]+|orion[a-z0-9._\\-]*|lucy-[a-z0-9._\\-]+|whisper-[a-z0-9._\\-]+|tts-[a-z0-9._\\-]+|bge-[a-z0-9._\\-]+';
+    const MODEL_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const MODEL_SLUG_TEST_RE = new RegExp('^(?:' + MODEL_SLUG_ALT + ')$', 'i');
+
+    function looksLikeModelSlug(s) {
+        return typeof s === 'string' && s.length >= 3 && s.length <= 90 && MODEL_SLUG_TEST_RE.test(s);
     }
 
-    function generateUUID() {
-        if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
-        return uuid7();
-    }
-
+    // ========== Extract model slugs from the page HTML (fallback) ==========
     function extractModelsFromPageHTML() {
         const models = [];
         const seen = new Set();
         try {
             const html = document.documentElement.outerHTML;
-            const modelPattern = /(?:"|'|`)(claude-[a-z0-9._\-]+|gpt-[a-z0-9._\-]+|chatgpt-[a-z0-9._\-]+|o[134]-[a-z0-9._\-]+|gemini-[a-z0-9._\-]+|llama-[a-z0-9._\-]+|deepseek-[a-z0-9._\-]+|qwen[a-z0-9._\-]{3,60}|mistral-[a-z0-9._\-]+|grok-[a-z0-9._\-]+|glm-[a-z0-9._\-]+|ernie-[a-z0-9._\-]+|kimi-[a-z0-9._\-]+|gemma-[a-z0-9._\-]+|phi-[a-z0-9._\-]+|codestral[a-z0-9._\-]*|mixtral[a-z0-9._\-]*|pixtral[a-z0-9._\-]*|ministral[a-z0-9._\-]*|c4ai-[a-z0-9._\-]+|command-[a-z0-9._\-]+|dbrx[a-z0-9._\-]*|yi-[a-z0-9._\-]+|dall-e-[a-z0-9._\-]+)(?:"|'|`)/gi;
+            const re = new RegExp('(?:"|\'|`)(' + MODEL_SLUG_ALT + ')(?:"|\'|`)', 'gi');
             let match;
-            while ((match = modelPattern.exec(html)) !== null) {
-                let slug = match[1];
-                if (!slug || slug.length < 4 || slug.length > 80) continue;
+            while ((match = re.exec(html)) !== null) {
+                const slug = match[1];
+                if (!slug || slug.length < 4 || slug.length > 90) continue;
                 if (/^(script|style|class|chunk|webpack|module|next-|__|data-)/.test(slug)) continue;
                 const lower = slug.toLowerCase();
                 if (seen.has(lower)) continue;
@@ -201,124 +340,264 @@
         return models;
     }
 
-    // RSC flight data extraction
+    // ========== Extract the model list from RSC flight data ==========
+    // initialModels may be:
+    //   - an array of slugs:      ["gpt-4o", "claude-sonnet-4.5", ...]
+    //   - an array of objects:    [{ id: <uuid>, publicName: "...", capabilities: {...} }]
+    //   - a dict keyed by slug:   { "gpt-4o": {...} }
     function extractModelsFromRSC() {
-        let models = [];
+        const models = [];
+        const seen = new Set();
         let modelAId = '';
+
+        function pushSlug(slug) {
+            if (typeof slug !== 'string') return;
+            slug = slug.trim().replace(/^["'`]+|["'`]+$/g, '');
+            if (!slug || slug.length < 3 || slug.length > 90) return;
+            if (/^(script|style|class|chunk|webpack|module|next-|__|data-|http)/i.test(slug)) return;
+            const lower = slug.toLowerCase();
+            if (seen.has(lower)) return;
+            seen.add(lower);
+            models.push(slug);
+        }
+
+        function ingestModels(data, strict) {
+            if (!data) return;
+            if (Array.isArray(data)) {
+                for (const item of data) {
+                    if (typeof item === 'string') {
+                        if (!strict || looksLikeModelSlug(item)) pushSlug(item);
+                    } else if (item && typeof item === 'object') {
+                        const uuid = item.id || item.modelId || '';
+                        const name = item.publicName || item.name || item.displayName || '';
+                        const slug = (item.slug || name || '').toString();
+                        if (slug && (!strict || looksLikeModelSlug(slug))) pushSlug(slug);
+                        const caps = item.capabilities || {};
+                        if (caps && (caps.outputCapabilities || caps.inputCapabilities)) {
+                            modelCapsMap[slug || name] = {
+                                outputs: (caps.outputCapabilities || []).map(String),
+                                inputs: (caps.inputCapabilities || []).map(String)
+                            };
+                        }
+                        if (MODEL_UUID_RE.test(uuid)) addModelMapping(name || slug || String(uuid), uuid, name || slug);
+                        if (item.organization && slug) {
+                            (modelCapsMap[slug] = modelCapsMap[slug] || { outputs: [], inputs: [] }).organization = item.organization;
+                        }
+                    }
+                }
+            } else if (data && typeof data === 'object') {
+                for (const [key, val] of Object.entries(data)) {
+                    const isUuidKey = MODEL_UUID_RE.test(key);
+                    const v = (val && typeof val === 'object') ? val : {};
+                    const name = v.publicName || v.name || v.displayName || '';
+                    const slug = (v.slug || (isUuidKey ? name : key) || '').toString();
+                    if (slug && (!strict || looksLikeModelSlug(slug))) pushSlug(slug);
+                    const uuidVal = v.id || v.modelId || '';
+                    if (MODEL_UUID_RE.test(uuidVal)) addModelMapping(name || slug || key, uuidVal, name || slug || key);
+                    if (isUuidKey && (slug || name)) addModelMapping(slug || name, key, name || slug);
+                }
+            }
+        }
+
+            function extractJsonAfterKey(content, key) {
+            let from = 0;
+            for (;;) {
+                const idx = content.indexOf(key, from);
+                if (idx === -1) return null;
+                const afterKey = content.substring(idx + key.length);
+                const start = afterKey.search(/[[{]/);
+                if (start === -1 || start > 12) { from = idx + key.length; continue; }
+                const open = afterKey[start];
+                const close = open === '[' ? ']' : '}';
+                let depth = 0, inStr = false, esc = false;
+                for (let i = start; i < afterKey.length; i++) {
+                    const c = afterKey[i];
+                    // A backslash escapes the next character EVERYWHERE — RSC text
+                    // quotes are written as \" sequences, so '\"' is never structural
+                    if (esc) { esc = false; continue; }
+                    if (c === '\\') { esc = true; continue; }
+                    if (c === '"') { inStr = !inStr; continue; }
+                    if (inStr) continue;
+                    if (c === open) depth++;
+                    else if (c === close) { depth--; if (depth === 0) return afterKey.substring(start, i + 1); }
+                }
+                return null;
+            }
+        }
+
+        function unescapeRsc(s) {
+            if (s.includes('\\"')) s = s.replace(/\\"/g, '"');
+            return s;
+        }
+
         try {
             const scripts = document.querySelectorAll('script');
+            let combinedText = '';
             for (const script of scripts) {
                 const content = script.textContent || '';
-                if (!content.includes('initialModels')) continue;
+                if (!content) continue;
+                if (!(content.includes('initialModels') || content.includes('initialModelAId') || content.includes('__next_f'))) continue;
+                combinedText += '\n' + content.slice(0, 3000000);
+
                 try {
-                    const idx = content.indexOf('initialModels');
-                    if (idx === -1) continue;
-                    const afterKey = content.substring(idx + 'initialModels'.length);
-                    const arrStart = afterKey.indexOf('[');
-                    if (arrStart === -1 || arrStart > 10) continue;
-                    let depth = 0, arrEnd = -1;
-                    for (let i = arrStart; i < afterKey.length; i++) {
-                        if (afterKey[i] === '[') depth++;
-                        else if (afterKey[i] === ']') { depth--; if (depth === 0) { arrEnd = i + 1; break; } }
-                    }
-                    if (arrEnd === -1) continue;
-                    let arrStr = afterKey.substring(arrStart, arrEnd);
-                    if (arrStr.includes('\\"')) arrStr = arrStr.replace(/\\"/g, '"').replace(/\\\\/g, '\\');
-                    const parsed = JSON.parse(arrStr);
-                    if (Array.isArray(parsed) && parsed.length > 0) {
-                        if (typeof parsed[0] === 'string') { models = parsed; }
-                        else if (typeof parsed[0] === 'object') {
-                            for (const m of parsed) {
-                                if (m && m.id) {
-                                    const uuid = m.id; const name = m.name || m.slug || '';
-                                    const slug = m.slug || name.toLowerCase().replace(/[\s.]+/g, '-');
-                                    models.push(slug);
-                                    if (/^[0-9a-f]{8}-/i.test(uuid)) addModelMapping(slug, uuid, name);
-                                }
-                            }
+                    let frag = extractJsonAfterKey(content, 'initialModels');
+                    if (frag) {
+                        const before = models.length;
+                        try { ingestModels(JSON.parse(unescapeRsc(frag)), false); } catch (e) {}
+                        if (models.length > before) {
+                            console.log(`[LMArena API] RSC initialModels: found ${models.length - before} models`);
                         }
                     }
                 } catch (e) {}
+
+                for (const key of ['text_models', 'all_models', 'all_text_models', '"models"']) {
+                    try {
+                        let frag = extractJsonAfterKey(content, key);
+                        if (!frag) continue;
+                        try { ingestModels(JSON.parse(unescapeRsc(frag)), true); } catch (e) {}
+                    } catch (e) {}
+                }
+
                 try {
-                    const aidMatch = content.match(/initialModelAId[^"]*"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"/i);
-                    if (aidMatch) modelAId = aidMatch[1];
+                    const aidMatch = content.match(/initialModelAId[^"]*"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"/i)
+                        || content.match(/initialModelAId[^0-9a-fA-F]{0,16}([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
+                    if (aidMatch && !modelAId) {
+                        modelAId = aidMatch[1];
+                        console.log(`[LMArena API] RSC: Found initialModelAId: ${modelAId}`);
+                    }
                 } catch (e) {}
             }
-            if (models.length === 0 && window.__NEXT_DATA__) {
+
+            if (combinedText) {
                 try {
-                    const nextDataStr = JSON.stringify(window.__NEXT_DATA__);
-                    const modelMatch = nextDataStr.match(/"initialModels"\s*:\s*(\[[^\]]*\])/);
-                    if (modelMatch) { const p = JSON.parse(modelMatch[1]); if (Array.isArray(p)) models = p; }
+                    const before = models.length;
+                    const scanRe = new RegExp('(?:[^a-z0-9]|^)(' + MODEL_SLUG_ALT + ')(?![a-z0-9])', 'gi');
+                    for (const m of combinedText.matchAll(scanRe)) pushSlug(m[1]);
+                    if (models.length > before) {
+                        console.log(`[LMArena API] RSC slug scan: ${models.length} models total`);
+                    }
                 } catch (e) {}
             }
-        } catch (e) {}
+
+            if (window.__NEXT_DATA__) {
+                try {
+                    const str = JSON.stringify(window.__NEXT_DATA__);
+                    let frag = extractJsonAfterKey(str, 'initialModels');
+                    if (frag) { try { ingestModels(JSON.parse(frag), false); } catch (e) {} }
+                } catch (e) {}
+            }
+
+        } catch (e) {
+            console.error('[LMArena API] RSC extraction error:', e);
+        }
+
         return { models, modelAId };
     }
 
-    // Click the dropdown menu to extract models
+    // ========== Extract models by clicking the dropdown menu ==========
     async function extractModelsViaDropdown() {
         const extracted = [];
+
         try {
             const modelBtn = document.querySelector('button[role="combobox"][aria-haspopup="dialog"]');
             if (!modelBtn) return extracted;
+
             modelBtn.focus();
             await new Promise(r => setTimeout(r, 100));
+
             const rect = modelBtn.getBoundingClientRect();
-            const clickX = rect.left + rect.width / 2, clickY = rect.top + rect.height / 2;
+            const clickX = rect.left + rect.width / 2;
+            const clickY = rect.top + rect.height / 2;
+
             modelBtn.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, clientX: clickX, clientY: clickY, pointerId: 1, pointerType: 'mouse' }));
             await new Promise(r => setTimeout(r, 30));
             modelBtn.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: clickX, clientY: clickY, pointerId: 1, pointerType: 'mouse' }));
             modelBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: clickX, clientY: clickY, cancelable: true }));
             modelBtn.click();
+
             await new Promise(r => setTimeout(r, 1200));
+
             const options = document.querySelectorAll('div[cmdk-item][role="option"]');
+            console.log(`[LMArena API] Dropdown: Found ${options.length} model options`);
+
             for (const opt of options) {
                 if (opt.offsetParent === null) continue;
+
                 const nameSpan = opt.querySelector('span.flex-1.truncate');
                 const name = nameSpan ? nameSpan.textContent.trim() : (opt.textContent || '').trim();
                 const dataValue = opt.getAttribute('data-value') || opt.getAttribute('value') || '';
+
                 if (name && name.length > 2) {
                     const slug = name.toLowerCase().replace(/[\s.]+/g, '-').replace(/[()]+/g, '');
-                    extracted.push({ name, slug, dataValue });
-                    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(dataValue)) {
+
+                    extracted.push({ name: name, slug: slug, dataValue: dataValue });
+
+                    if (MODEL_UUID_RE.test(dataValue)) {
                         addModelMapping(slug, dataValue, name);
                         addModelMapping(name, dataValue, name);
                     }
                 }
             }
+
             document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true, cancelable: true }));
             await new Promise(r => setTimeout(r, 200));
-        } catch (e) {}
+
+        } catch (e) {
+            console.error('[LMArena API] Dropdown extraction error:', e);
+        }
+
         return extracted;
     }
 
+    // ========== Combined model data extraction ==========
     async function extractAllModelData() {
         const rscData = extractModelsFromRSC();
         modelSlugList = rscData.models;
         initialModelAId = rscData.modelAId;
-        console.log(`[AI Proxy Bridge] RSC: ${modelSlugList.length} slugs, initialModelAId: ${initialModelAId || 'none'}`);
-        // If RSC fails, scan slugs from the page HTML
+
+        console.log(`[LMArena API] RSC extraction: ${modelSlugList.length} slugs, initialModelAId: ${initialModelAId || 'none'}`);
+
         if (modelSlugList.length === 0) {
             const htmlSlugs = extractModelsFromPageHTML();
             if (htmlSlugs.length > 0) {
                 modelSlugList = htmlSlugs;
-                console.log(`[AI Proxy Bridge] HTML slug: ${htmlSlugs.length} models`);
+                console.log(`[LMArena API] HTML slug extraction: ${htmlSlugs.length} models`);
             }
         }
-        if (initialModelAId && modelSlugList.length > 0) addModelMapping(modelSlugList[0], initialModelAId, modelSlugList[0]);
+
         const dropdownModels = await extractModelsViaDropdown();
         if (dropdownModels.length > 0) {
-            for (const dm of dropdownModels) { if (!modelSlugList.includes(dm.slug)) modelSlugList.push(dm.slug); }
+            console.log(`[LMArena API] Dropdown: Extracted ${dropdownModels.length} models`);
+            for (const dm of dropdownModels) {
+                if (!modelSlugList.includes(dm.slug)) modelSlugList.push(dm.slug);
+            }
         }
+
+        if (initialModelAId && modelSlugList.length > 0) {
+            addModelMapping(modelSlugList[0], initialModelAId, modelSlugList[0]);
+        }
+
         const modelList = [];
         const seenSlugs = new Set();
+
         for (const slug of modelSlugList) {
             if (seenSlugs.has(slug.toLowerCase())) continue;
             seenSlugs.add(slug.toLowerCase());
+
             const uuid = modelUuidMap[slug] || modelUuidMap[slug.toLowerCase()] || '';
             const displayName = uuidToSlugMap[uuid] || slug;
-            modelList.push({ id: uuid || slug, name: displayName, slug: slug });
+            const caps = modelCapsMap[slug] || modelCapsMap[displayName] || {};
+
+            modelList.push({
+                id: uuid || slug,
+                name: displayName,
+                slug: slug,
+                outputs: caps.outputs || [],
+                inputs: caps.inputs || [],
+                organization: caps.organization || undefined
+            });
         }
+
         return modelList;
     }
 
@@ -326,305 +605,176 @@
         (async () => {
             try {
                 const modelList = await extractAllModelData();
+
                 if (socket && socket.readyState === WebSocket.OPEN) {
                     socket.send(JSON.stringify({
                         type: 'model_data',
-                        data: { uuidMap: modelUuidMap, nameMap: modelDisplayNameMap, uuidToSlug: uuidToSlugMap, models: modelList, initialModelAId: initialModelAId }
+                        data: {
+                            uuidMap: modelUuidMap,
+                            nameMap: modelDisplayNameMap,
+                            uuidToSlug: uuidToSlugMap,
+                            models: modelList,
+                            initialModelAId: initialModelAId
+                        }
                     }));
-                    console.log(`[AI Proxy Bridge] Sent model data: ${modelList.length} models, ${new Set(Object.values(modelUuidMap)).size} UUIDs`);
+                    console.log(`[LMArena API] Sent model data: ${modelList.length} models, ${new Set(Object.values(modelUuidMap)).size} UUIDs`);
                 }
-            } catch (e) { console.error('[AI Proxy Bridge] sendModelDataToServer error:', e); }
+            } catch (e) {
+                console.error('[LMArena API] sendModelDataToServer error:', e);
+            }
         })();
     }
 
-    function sendApiInfoToServer() {
-        if (socket && socket.readyState === WebSocket.OPEN && capturedRequestTemplate) {
-            socket.send(JSON.stringify({ type: 'api_info', data: { ...capturedRequestTemplate, isDirect: !!capturedDirectTemplate, isArena: !!capturedArenaTemplate } }));
-        }
-    }
-
+    // ========== Resolve modelAId ==========
     function resolveModelAId(model) {
         if (!model) return initialModelAId || '';
+
         if (modelUuidMap[model]) return modelUuidMap[model];
         if (modelUuidMap[model.toLowerCase()]) return modelUuidMap[model.toLowerCase()];
+
         if (modelDisplayNameMap[model]) return modelDisplayNameMap[model];
         if (modelDisplayNameMap[model.toLowerCase()]) return modelDisplayNameMap[model.toLowerCase()];
+
         const normalized = model.toLowerCase().replace(/[-_.\s]/g, '');
         for (const [key, uuid] of Object.entries(modelUuidMap)) {
             if (key.toLowerCase().replace(/[-_.\s]/g, '') === normalized) return uuid;
         }
-        if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(model)) return model;
-        if (initialModelAId) return initialModelAId;
+
+        if (MODEL_UUID_RE.test(model)) return model;
+
+        if (initialModelAId) {
+            console.warn(`[LMArena API] Cannot resolve "${model}", falling back to initialModelAId`);
+            return initialModelAId;
+        }
+
         return model;
     }
 
-    function buildDirectModeBody(modelId, content, serverModelAId) {
-        const resolvedModelAId = serverModelAId ? resolveModelAId(serverModelAId) : resolveModelAId(modelId);
-        return {
-            id: uuid7(),
-            mode: 'direct',
-            modelAId: resolvedModelAId,
-            userMessageId: uuid7(),
-            modelAMessageId: uuid7(),
-            userMessage: { content, experimental_attachments: [], metadata: {} },
-            modality: 'chat',
-            recaptchaV3Token: ''
-        };
-    }
-
-    // ========== DOM operations: fill the message into the input box ==========
-    function findChatInput() {
-        const selectors = ['textarea[placeholder]', 'textarea[name="message"]', 'form textarea', 'textarea'];
-        for (const sel of selectors) {
-            const el = document.querySelector(sel);
-            if (el && el.offsetParent !== null) return el;
+    // ========== WebSocket connection ==========
+    function sendToServer(requestId, data) {
+        if (socket && socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ request_id: requestId, data: data }));
         }
-        return null;
     }
 
-    function setReactInputValue(element, value) {
-        element.focus();
-
-        // Method 1: execCommand — most reliable, uses the browser's native input pipeline
+    function sendPageSourceViaWs() {
         try {
-            element.select();
-            if (document.execCommand('insertText', false, value)) {
-                console.log('[AI Proxy Bridge] setReactInputValue: execCommand succeeded');
-                return;
+            const htmlContent = document.documentElement.outerHTML;
+            if (socket && socket.readyState === WebSocket.OPEN) {
+                socket.send(JSON.stringify({ type: 'page_source', data: htmlContent }));
             }
         } catch (e) {}
-
-        // Method 2: native setter + InputEvent (React 18 compatible)
-        const nativeSetter = Object.getOwnPropertyDescriptor(
-            element.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype, 'value'
-        )?.set;
-        if (nativeSetter) nativeSetter.call(element, value); else element.value = value;
-        element.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value }));
-        element.dispatchEvent(new Event('change', { bubbles: true }));
-        console.log('[AI Proxy Bridge] setReactInputValue: native setter + InputEvent');
     }
 
-    function simulateEnterKey(element) {
-        if (!element) element = findChatInput();
-        if (!element) return false;
-        element.focus();
-        element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
-        element.dispatchEvent(new KeyboardEvent('keypress', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
-        element.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
-        console.log('[AI Proxy Bridge] Enter key simulated');
-        return true;
-    }
-
-    function fillChatInput(content) {
-        const input = findChatInput();
-        if (!input) return false;
-        setReactInputValue(input, content);
-        console.log('[AI Proxy Bridge] Message filled into the input box — will try to auto-submit');
-        return true;
-    }
-
-    // ========== MutationObserver: watch page DOM to capture the AI response ==========
-    let domObserver = null;
-    let domObserverRequestId = null;
-    let lastAssistantText = '';
-
-    function startDOMObserver(requestId) {
-        stopDOMObserver();
-        domObserverRequestId = requestId;
-        lastAssistantText = '';
-
-        const chatContainer = document.querySelector('[role="log"]') ||
-            document.querySelector('[class*="conversation"]') ||
-            document.querySelector('[class*="thread"]') ||
-            document.querySelector('main') || document.body;
-
-        const existingAssistantMsgs = chatContainer.querySelectorAll('[class*="assistant"], [data-message-role="assistant"]');
-        const existingCount = existingAssistantMsgs.length;
-
-        domObserver = new MutationObserver(() => {
-            try {
-                const text = getLatestAssistantText(chatContainer, existingCount);
-                if (text && text.length > lastAssistantText.length) {
-                    const delta = text.substring(lastAssistantText.length);
-                    lastAssistantText = text;
-                    sendToServer(requestId, delta);
-                }
-            } catch (e) {}
-        });
-        domObserver.observe(chatContainer, { childList: true, subtree: true, characterData: true });
-    }
-
-    function stopDOMObserver() {
-        if (domObserver) { domObserver.disconnect(); domObserver = null; }
-        domObserverRequestId = null;
-    }
-
-    function getLatestAssistantText(container, skipCount) {
-        const selectors = [
-            '[class*="assistant"] [class*="markdown"]', '[class*="assistant"] [class*="prose"]',
-            '[class*="assistant"] [class*="message"]', '[class*="assistant"] [class*="content"]',
-            '[data-message-role="assistant"]',
-            '[class*="response"] [class*="markdown"]', '[class*="response"] [class*="prose"]',
-        ];
-        for (const sel of selectors) {
-            const els = container.querySelectorAll(sel);
-            if (els.length > skipCount) {
-                const last = els[els.length - 1];
-                const text = (last.innerText || last.textContent || '').trim();
-                if (text.length > 2) return text;
-            }
+    function sendStatus(requestId, status, message) {
+        if (socket && socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({
+                type: 'status',
+                data: { status: status, requestId: requestId, message: message || '' }
+            }));
         }
-        const markdownEls = container.querySelectorAll('.markdown, .prose, [class*="markdown"], [class*="prose"]');
-        if (markdownEls.length > 0) {
-            const last = markdownEls[markdownEls.length - 1];
-            const text = (last.innerText || last.textContent || '').trim();
-            if (text.length > 5) return text;
-        }
-        return null;
     }
-
-    // ========== Fetch diagnostics log ==========
-    let fetchLog = [];
 
     function connect() {
+        console.log(`[LMArena API] Connecting to ${SERVER_URL}...`);
         socket = new WebSocket(SERVER_URL);
+
         socket.onopen = () => {
-            console.log("[AI Proxy Bridge] Connected");
+            console.log("[LMArena API] Connected to desktop app");
             document.title = "✅ " + document.title.replace(/^✅\s*/, '');
-            sendApiInfoToServer(); sendPageSourceViaWs(); sendModelDataToServer();
+            sendPageSourceViaWs();
+            sendModelDataToServer();
         };
+
         socket.onmessage = async (event) => {
             try {
                 const message = JSON.parse(event.data);
+
                 if (message.command) {
-                    if (message.command === 'send_page_source') sendPageSourceViaWs();
-                    else if (message.command === 'refresh' || message.command === 'reconnect') location.reload();
-                    else if (message.command === 'cancel_request') {
+                    if (message.command === 'refresh' || message.command === 'reconnect') {
+                        location.reload();
+                    } else if (message.command === 'send_page_source') {
+                        sendPageSourceViaWs();
+                    } else if (message.command === 'cancel_request') {
                         const { request_id } = message;
-                        if (request_id && activeRequests.has(request_id)) { activeRequests.get(request_id).abort(); activeRequests.delete(request_id); }
-                    } else if (message.command === 'refresh_models') sendModelDataToServer();
+                        if (request_id) activeRequests.delete(request_id);
+                    } else if (message.command === 'refresh_models') {
+                        sendModelDataToServer();
+                    }
                     return;
                 }
+
                 const { request_id, data } = message;
-                if (!request_id || !data) return;
-                const controller = new AbortController();
-                activeRequests.set(request_id, controller);
+                if (!request_id || !data) {
+                    console.error("[LMArena API] Invalid request message");
+                    return;
+                }
+
+                console.log(`[LMArena API] Request ${request_id.substring(0, 8)}, model: ${data.model || 'N/A'}, mode: ${data.mode || 'direct'}`);
+
+                activeRequests.add(request_id);
+
                 (async () => {
                     try {
-                        const model = data.model || '';
-                        const content = data.content || 'Hello';
-                        const modelAId = (buildDirectModeBody(model, content, data.modelAId)).modelAId;
+                        const modelAId = data.modelAId || resolveModelAId(data.model || '');
+                        const modelBId = data.modelBId || (data.modelB ? resolveModelAId(data.modelB) : '');
 
-                        // ====== Dual strategy: fetch hijack + DOM watching ======
-                        console.log(`[AI Proxy Bridge] Setting up hijack + DOM observer: modelAId=${modelAId}`);
+                        sendStatus(request_id, 'executing', `Running ${data.mode || 'direct'} request on the page (model: ${data.model || modelAId})`);
 
-                        const inputFilled = fillChatInput(content);
-
-                        let hijackResolve;
-                        const hijackPromise = new Promise(resolve => { hijackResolve = resolve; });
-                        pendingHijack = { requestId: request_id, modelAId, content, resolve: hijackResolve, autoSubmitted: false };
-
-                        // Also start DOM watching at the same time
-                        startDOMObserver(request_id);
-
-                        if (socket && socket.readyState === WebSocket.OPEN) {
-                            socket.send(JSON.stringify({
-                                type: 'status',
-                                data: { status: 'waiting_for_trigger', requestId: request_id, message: inputFilled ? 'Message filled — will auto-submit and listen for the response' : 'Please send a message on the page' }
-                            }));
-                        }
-
-                        // Auto-simulate Enter after an 800ms delay
-                        setTimeout(() => {
-                            if (pendingHijack && pendingHijack.requestId === request_id) {
-                                simulateEnterKey(findChatInput());
-                                pendingHijack.autoSubmitted = true;
+                        const push = (evt) => {
+                            if (!activeRequests.has(request_id)) return; // cancelled — drop
+                            if (evt && evt.t === 'meta') {
+                                console.log(`[LMArena API] meta: ${JSON.stringify(evt.d)}`);
+                                return; // meta events are logged locally only
                             }
-                        }, 800);
+                            sendToServer(request_id, evt);
+                        };
 
-                        // Wait: fetch hijack or DOM watching
-                        const startTime = Date.now();
-                        while (Date.now() - startTime < 120000) {
-                            await new Promise(r => setTimeout(r, 500));
-                            if (!activeRequests.has(request_id)) { pendingHijack = null; stopDOMObserver(); return; }
-                            if (!pendingHijack) { stopDOMObserver(); return; } // fetch hijack succeeded
-                            if (lastAssistantText && domObserverRequestId === request_id) {
-                                sendToServer(request_id, '[DONE]');
-                                pendingHijack = null;
-                                stopDOMObserver();
-                                return;
-                            }
-                        }
+                        await arenaExec.run({
+                            mode: data.mode || 'direct',
+                            modelAId: modelAId,
+                            modelBId: modelBId,
+                            content: data.content || 'Hello',
+                            modality: data.modality || 'chat'
+                        }, push);
 
-                        pendingHijack = null;
-                        stopDOMObserver();
-                        throw new Error('Request timed out — press Enter manually in the browser to send the message, or refresh the lmarena.ai page and try again.');
+                        console.log(`[LMArena API] Request ${request_id.substring(0, 8)} finished`);
                     } catch (error) {
-                        window.isProxyRequest = false;
-                        if (error.name !== 'AbortError') { console.error('[AI Proxy Bridge] Error:', error.message); sendToServer(request_id, { error: error.message }); }
-                    } finally { activeRequests.delete(request_id); }
+                        console.error(`[LMArena API] Error:`, error.message);
+                        if (activeRequests.has(request_id)) {
+                            sendToServer(request_id, { error: error.message });
+                        }
+                    } finally {
+                        activeRequests.delete(request_id);
+                    }
                 })();
-            } catch (e) { console.error('[AI Proxy Bridge] Message error:', e); }
+
+            } catch (error) {
+                console.error("[LMArena API] Message error:", error);
+            }
         };
+
         socket.onclose = () => {
+            console.warn("[LMArena API] Disconnected. Reconnecting in 5s...");
             if (document.title.startsWith("✅ ")) document.title = document.title.substring(2);
-            activeRequests.forEach(c => c.abort()); activeRequests.clear(); setTimeout(connect, 5000);
+            activeRequests.clear();
+            setTimeout(connect, 5000);
         };
+
         socket.onerror = () => { socket.close(); };
     }
 
-    async function handleStream(response, requestId) {
-        if (!response.body) {
-            const text = await response.text();
-            const extracted = extractTextFromRSC(text);
-            if (extracted) sendToServer(requestId, extracted); else sendToServer(requestId, text);
-            sendToServer(requestId, "[DONE]"); return;
-        }
-        const reader = response.body.getReader(); const decoder = new TextDecoder();
-        let buffer = '';
-        while (true) {
-            const { value, done } = await reader.read();
-            if (done) {
-                if (buffer.trim()) { const t = extractTextFromRSCLine(buffer); if (t) sendToServer(requestId, t); }
-                sendToServer(requestId, "[DONE]"); break;
-            }
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split('\n');
-            buffer = lines.pop() || '';
-            for (const line of lines) {
-                if (!line || !line.trim()) continue;
-                const t = extractTextFromRSCLine(line);
-                if (t) sendToServer(requestId, t);
-            }
-        }
+    // ========== Initialization ==========
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', () => sendModelDataToServer());
+    } else {
+        sendModelDataToServer();
     }
 
-    function extractTextFromRSCLine(line) {
-        try {
-            const ci = line.indexOf(':');
-            if (ci <= 0) return null;
-            if (line.substring(0, ci) === '0') {
-                const parsed = JSON.parse(line.substring(ci + 1));
-                if (typeof parsed === 'string' && parsed.length > 0) return parsed;
-            }
-        } catch (e) {}
-        return null;
-    }
-
-    function extractTextFromRSC(raw) {
-        let text = '';
-        for (const line of raw.split('\n')) { const t = extractTextFromRSCLine(line); if (t) text += t; }
-        return text;
-    }
-
-    function sendToServer(requestId, data) { if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ request_id: requestId, data: data })); }
-    function sendPageSourceViaWs() { try { if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'page_source', data: document.documentElement.outerHTML })); } catch (e) {} }
-
-    if (document.readyState !== 'loading') sendModelDataToServer();
-    else document.addEventListener('DOMContentLoaded', () => sendModelDataToServer());
-    setTimeout(() => sendModelDataToServer(), 3000);
-    setTimeout(() => sendModelDataToServer(), 8000);
-    setTimeout(() => sendModelDataToServer(), 15000);
+    // Delayed extraction (wait for dynamic loading to finish)
+    setTimeout(() => { sendModelDataToServer(); }, 3000);
+    setTimeout(() => { sendModelDataToServer(); }, 8000);
+    setTimeout(() => { sendModelDataToServer(); }, 15000);
 
     connect();
 })();

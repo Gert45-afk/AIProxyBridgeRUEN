@@ -4,11 +4,111 @@ const cors = require('cors');
 const { randomUUID } = require('crypto');
 const WebSocket = require('ws');
 
+// Supported chat modes on arena.ai
+const VALID_MODES = new Set(['direct', 'direct-battle', 'battle', 'side-by-side', 'agent']);
+
+// ============================================================================
+// Aggregates structured arena events ({t, s, d}) into OpenAI-shaped output.
+// Both backends (WebSocket userscript & Puppeteer in-page executor) emit the
+// same event shape, so a single sink handles stream and non-stream modes.
+// ============================================================================
+class ArenaEventSink {
+    constructor(dual) {
+        this.dual = dual;               // battle / side-by-side → two model panels
+        this.textBySide = { a: '', b: '' };
+        this.reasoningBySide = { a: '', b: '' };
+        this.headersEmitted = { a: false, b: false };
+        this.finishReason = null;
+        this.usage = null;
+        this.error = null;
+        this.done = false;
+    }
+
+    // Returns an array of { kind: 'content'|'reasoning', delta } actions to emit.
+    ingest(evt) {
+        const actions = [];
+        if (!evt || typeof evt !== 'object') return actions;
+
+        // Plain string from legacy userscripts — treat as model A text delta
+        if (typeof evt === 'string') {
+            if (evt === '[DONE]') { this.done = true; return actions; }
+            return this._pushText('a', evt, actions);
+        }
+
+        switch (evt.t) {
+            case 'text': this._pushText(evt.s || 'a', String(evt.d || ''), actions); break;
+            case 'reasoning': {
+                const d = String(evt.d || '');
+                if (!d) break;
+                this.reasoningBySide[evt.s || 'a'] += d;
+                actions.push({ kind: 'reasoning', delta: d });
+                break;
+            }
+            case 'image': {
+                const url = String(evt.d || '');
+                if (url) this._pushText(evt.s || 'a', `\n\n![generated image](${url})\n\n`, actions);
+                break;
+            }
+            case 'finish': {
+                const d = evt.d || {};
+                if (d.finishReason && !this.finishReason) this.finishReason = String(d.finishReason);
+                if (d.usage && typeof d.usage === 'object') this.usage = d.usage;
+                break;
+            }
+            case 'error':
+                if (!this.error) this.error = String(evt.d || 'Unknown arena error');
+                this.done = true;
+                break;
+            case 'done':
+                this.done = true;
+                break;
+            case 'meta':
+            default:
+                break; // meta/retry events are informational
+        }
+        return actions;
+    }
+
+    _pushText(side, delta, actions) {
+        if (!delta) return actions;
+        let out = delta;
+        if (this.dual && !this.headersEmitted[side]) {
+            this.headersEmitted[side] = true;
+            out = (this.textBySide.a || this.textBySide.b ? '\n\n' : '') + `**Model ${side.toUpperCase()}:**\n\n` + out;
+        }
+        this.textBySide[side] += delta;
+        actions.push({ kind: 'content', delta: out });
+        return actions;
+    }
+
+    get content() {
+        if (!this.dual) return this.textBySide.a + this.textBySide.b;
+        // Non-streaming aggregation: label the two panels explicitly
+        let out = '';
+        if (this.textBySide.a) out += '**Model A:**\n\n' + this.textBySide.a;
+        if (this.textBySide.b) out += (out ? '\n\n' : '') + '**Model B:**\n\n' + this.textBySide.b;
+        return out;
+    }
+
+    get reasoning() {
+        let out = this.reasoningBySide.a;
+        if (this.dual && this.reasoningBySide.b) {
+            out += (out ? '\n\n' : '') + this.reasoningBySide.b;
+        }
+        return out;
+    }
+
+    get finishReasonSafe() {
+        return (this.finishReason && this.finishReason !== 'null') ? this.finishReason : 'stop';
+    }
+}
+
 class ProxyServer {
-    constructor(port, browserManager, apiKey) {
+    constructor(port, browserManager, apiKey, options) {
         this.port = port;
         this.browserManager = browserManager;
         this.apiKey = apiKey;
+        this.defaultMode = (options && options.defaultMode) || 'direct';
         this.app = express();
         this.server = null;
         this.wss = null;
@@ -19,6 +119,12 @@ class ProxyServer {
         this.capturedApiInfo = null;   // API info captured from WS clients
         this.capturedModelData = null; // model UUID mapping extracted from WS clients
         this.onModelUpdate = null;     // callback: notify the main process when the model list updates
+    }
+
+    setOptions(opts) {
+        if (opts && typeof opts.defaultMode === 'string' && VALID_MODES.has(opts.defaultMode)) {
+            this.defaultMode = opts.defaultMode;
+        }
     }
 
     async start() {
@@ -38,7 +144,7 @@ class ProxyServer {
                     id: m.id,
                     object: 'model',
                     created: Date.now(),
-                    owned_by: m.provider || 'arena'
+                    owned_by: m.organization || m.provider || 'arena'
                 }))
             });
         });
@@ -52,33 +158,43 @@ class ProxyServer {
 
             const { model, messages, stream = false } = req.body;
             const requestId = randomUUID();
+            const spec = this.parseModelSpec(model, req.body);
+            const lastUserMsg = (messages || []).filter(m => m.role === 'user').pop();
+            const messageText = typeof (lastUserMsg && lastUserMsg.content) === 'string'
+                ? lastUserMsg.content
+                : (lastUserMsg && Array.isArray(lastUserMsg.content)
+                    ? lastUserMsg.content.filter(p => p && p.type === 'text').map(p => p.text || '').join('\n')
+                    : 'Hello');
+            spec.content = messageText || 'Hello';
+            this._resolveSpec(spec);
 
-            // Prefer WebSocket client mode
+            console.log(`[HTTP] /v1/chat/completions: model=${model} → ${spec.modelA}${spec.modelB ? ' vs ' + spec.modelB : ''}, mode=${spec.mode}, stream=${stream}`);
+
+            // Prefer a WebSocket client (real browser via Tampermonkey)
             const wsClient = this.getNextWsClient();
             if (wsClient) {
-                return this.handleViaWsClient(wsClient, requestId, model, messages, stream, res);
+                return this.handleViaWsClient(wsClient, requestId, spec, stream, res);
             }
 
-            // Fall back to browser client mode (Puppeteer UI automation)
-            if (!this.browserManager || this.browserManager.pages.length === 0) {
-                return res.status(503).json({
-                    error: 'No clients available — create a browser instance and log in to lmarena.ai first, or install the Tampermonkey script to connect a WebSocket client'
-                });
-            }
-
+            // Fall back to the Puppeteer in-page executor (hidden by default)
             if (stream) {
                 res.setHeader('Content-Type', 'text/event-stream');
                 res.setHeader('Cache-Control', 'no-cache');
                 res.setHeader('Connection', 'keep-alive');
 
+                const sink = new ArenaEventSink(spec.dual);
                 try {
-                    await this.browserManager.handleChatCompletion(requestId, model, messages, (chunk) => {
-                        if (chunk.error) {
-                            res.write(`data: ${JSON.stringify({ error: chunk.error })}\n\n`);
-                        } else {
-                            res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+                    await this.browserManager.executeArenaRequest(spec, (evt) => {
+                        const actions = sink.ingest(evt);
+                        for (const a of actions) this._writeSseAction(res, requestId, spec.modelA, a);
+                        if (sink.error) {
+                            res.write(`data: ${JSON.stringify({ error: sink.error })}\n\n`);
                         }
                     });
+                    if (!sink.error && !sink.content.trim() && !sink.reasoning.trim()) {
+                        res.write(`data: ${JSON.stringify({ error: 'Empty response — make sure the instance is logged in (import session cookies) and the model is available' })}\n\n`);
+                    }
+                    this._writeSseFinal(res, requestId, spec.modelA, sink);
                     res.write('data: [DONE]\n\n');
                     res.end();
                 } catch (error) {
@@ -87,31 +203,11 @@ class ProxyServer {
                 }
             } else {
                 try {
-                    let fullContent = '';
-                    let chunkError = null;
-                    await this.browserManager.handleChatCompletion(requestId, model, messages, (chunk) => {
-                        if (chunk.error) {
-                            chunkError = chunk.error;
-                            return;
-                        }
-                        if (chunk.choices && chunk.choices[0].delta && chunk.choices[0].delta.content) {
-                            fullContent += chunk.choices[0].delta.content;
-                        }
-                    });
-                    if (chunkError) {
-                        return res.status(500).json({ error: chunkError });
+                    const sink = await this._collectViaBrowser(spec);
+                    if (sink.error) {
+                        return res.status(500).json({ error: sink.error });
                     }
-                    res.json({
-                        id: requestId,
-                        object: 'chat.completion',
-                        created: Math.floor(Date.now() / 1000),
-                        model: model,
-                        choices: [{
-                            index: 0,
-                            message: { role: 'assistant', content: fullContent },
-                            finish_reason: 'stop'
-                        }]
-                    });
+                    res.json(this._buildCompletionJson(requestId, spec.modelA, sink));
                 } catch (error) {
                     res.status(500).json({ error: error.message });
                 }
@@ -148,12 +244,114 @@ class ProxyServer {
         });
     }
 
+    // ========== Model spec parsing: model suffixes select the arena mode ==========
+    //   "gpt-5"                → direct mode (or configured default)
+    //   "gpt-5~direct"         → explicit direct mode
+    //   "gpt-5~battle"         → battle mode (anonymous pair, model choice ignored)
+    //   "gpt-5~vs~claude-4.5"  → side-by-side with the two models
+    //   "gpt-5~side-by-side"   → side-by-side (second model comes from modelB/model_b)
+    //   "gpt-5~agent"          → agent mode (experimental)
+    // The request body may also carry explicit fields: "mode" and "modelB"/"model_b".
+    parseModelSpec(rawModel, body) {
+        let model = String(rawModel || '').trim();
+        let mode = null;
+        let modelB = body && (body.modelB || body.model_b) ? String(body.modelB || body.model_b) : null;
+
+        const bodyMode = body && typeof body.mode === 'string' ? body.mode.trim() : '';
+        if (bodyMode && VALID_MODES.has(bodyMode)) mode = bodyMode;
+
+        const vsIdx = model.toLowerCase().indexOf('~vs~');
+        if (vsIdx !== -1) {
+            const a = model.slice(0, vsIdx).trim();
+            const b = model.slice(vsIdx + 4).trim();
+            if (a) model = a;
+            if (b) modelB = b;
+            if (!mode) mode = 'side-by-side';
+        } else {
+            const suffixMatch = model.match(/~(direct|direct-battle|battle|side-by-side|side|agent)$/i);
+            if (suffixMatch) {
+                model = model.slice(0, suffixMatch.index).trim();
+                if (!mode) {
+                    let m = suffixMatch[1].toLowerCase();
+                    if (m === 'side') m = 'side-by-side';
+                    mode = m;
+                }
+            }
+        }
+
+        if (!mode) mode = this.defaultMode;
+        if (mode === 'side-by-side' && !modelB) {
+            // No second model — degrade gracefully to direct
+            console.log('[ProxyServer] side-by-side requested without a second model — falling back to direct');
+            mode = 'direct';
+        }
+        if (mode === 'agent') {
+            console.log('[ProxyServer] Agent mode requested (experimental) — arena agent backend may differ; trying mode "agent" with fallback');
+        }
+
+        return {
+            modelA: model,
+            modelB: modelB,
+            mode,
+            dual: (mode === 'battle' || mode === 'side-by-side'),
+            modelAId: '',
+            modelBId: '',
+            modality: 'chat',
+            content: ''
+        };
+    }
+
+    // Resolve UUIDs + modality for a parsed spec
+    _resolveSpec(spec) {
+        spec.modelAId = (spec.mode === 'battle') ? '' : this.resolveModelUuid(spec.modelA);
+        spec.modelBId = (spec.mode === 'side-by-side' && spec.modelB) ? this.resolveModelUuid(spec.modelB) : '';
+        try {
+            const caps = this.browserManager.getModelCapabilities
+                ? this.browserManager.getModelCapabilities(spec.modelA)
+                : { outputs: [] };
+            const outs = caps.outputs || [];
+            if (outs.length > 0 && outs.includes('image') && !outs.includes('text')) {
+                spec.modality = 'image';
+            }
+        } catch (e) {}
+        return spec;
+    }
+
+    resolveModelUuid(model) {
+        if (!model) return (this.capturedModelData && this.capturedModelData.initialModelAId) || '';
+        // UUID passed directly
+        if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(model)) return model;
+
+        const sources = [];
+        if (this.capturedModelData) {
+            sources.push(this.capturedModelData.uuidMap || {});
+            sources.push(this.capturedModelData.nameMap || {});
+        }
+        if (this.browserManager && this.browserManager.modelUuidMap) {
+            sources.push(this.browserManager.modelUuidMap);
+        }
+
+        // Exact matches
+        for (const map of sources) {
+            if (map[model]) return map[model];
+            if (map[model.toLowerCase()]) return map[model.toLowerCase()];
+        }
+        // Fuzzy match
+        const normalized = model.toLowerCase().replace(/[-_.\s]/g, '');
+        for (const map of sources) {
+            for (const [key, uuid] of Object.entries(map)) {
+                if (key.toLowerCase().replace(/[-_.\s]/g, '') === normalized) return uuid;
+            }
+        }
+        // Fall back to the default model UUID if we have one
+        if (this.capturedModelData && this.capturedModelData.initialModelAId) return this.capturedModelData.initialModelAId;
+        if (this.browserManager && this.browserManager.initialModelAId) return this.browserManager.initialModelAId;
+        return model;
+    }
+
     // ========== WebSocket server setup ==========
     setupWebSocket(server) {
         this.wss = new WebSocket.Server({ server, path: '/ws' });
-
-        // Store API info (URL, headers, etc.) sent by WS clients
-        this.capturedApiInfo = null;
 
         this.wss.on('connection', (ws, req) => {
             const clientId = ++this.wsClientId;
@@ -167,7 +365,6 @@ class ProxyServer {
             this.wsClients.set(clientId, { ws, info: clientInfo, activeRequests: new Map() });
             console.log(`[WS] Client #${clientId} connected from ${clientInfo.ip}, total: ${this.wsClients.size}`);
 
-            // Notify the main process about client list changes
             this._notifyWsClientChange();
 
             // Request the page source after connecting to update the model list
@@ -182,10 +379,21 @@ class ProxyServer {
                     // Handle page source (transferred over WS to avoid mixed-content issues)
                     if (msg.type === 'page_source' && msg.data) {
                         try {
-                            const models = this.browserManager.parseModelsFromHTML(msg.data);
-                            if (models.length > 0) {
-                                this.browserManager.models = models;
-                                console.log(`[WS] Parsed ${models.length} models from page source via WS`);
+                            // Prefer structured initialModels parsing (names + UUIDs + capabilities)
+                            const { parseArenaModelsHTML } = require('./arena-client');
+                            const parsed = parseArenaModelsHTML(msg.data);
+                            if (parsed.models.length > 0) {
+                                this.browserManager.models = parsed.models;
+                                Object.assign(this.browserManager.modelUuidMap, parsed.uuidMap);
+                                if (parsed.initialModelAId) this.browserManager.initialModelAId = parsed.initialModelAId;
+                                console.log(`[WS] Parsed ${parsed.models.length} models (${Object.keys(parsed.uuidMap).length} UUID mappings) from page source via WS`);
+                                if (this.onModelUpdate) this.onModelUpdate(this.browserManager.models);
+                            } else {
+                                const models = this.browserManager.parseModelsFromHTML(msg.data);
+                                if (models.length > 0) {
+                                    this.browserManager.models = models;
+                                    console.log(`[WS] Parsed ${models.length} models from page source via WS (slug scan)`);
+                                }
                             }
                         } catch (e) {
                             console.error('[WS] Failed to parse page source:', e.message);
@@ -210,10 +418,10 @@ class ProxyServer {
                         console.log(`[WS] Captured model data: ${modelCount} models, ${uuidCount} UUIDs, ${mappingCount} mappings, initialModelAId: ${initAId.substring(0, 12)}...`);
 
                         // Update browserManager's model list
-                        // Update even without UUIDs as long as a slug list exists (otherwise the old list is shown forever)
                         if (msg.data.models && msg.data.models.length > 0) {
                             this.browserManager.models = msg.data.models;
-                            // Notify the main process that the model list was updated
+                            if (msg.data.uuidMap) Object.assign(this.browserManager.modelUuidMap, msg.data.uuidMap);
+                            if (initAId) this.browserManager.initialModelAId = initAId;
                             if (this.onModelUpdate) {
                                 this.onModelUpdate(msg.data.models);
                             }
@@ -227,20 +435,18 @@ class ProxyServer {
                         if (d.recentFetchUrls) {
                             console.log(`[WS] Diagnostics: ${d.event} | fetchUrls: ${JSON.stringify(d.recentFetchUrls)} | pendingHijack: ${d.pendingHijack}`);
                         } else {
-                            console.log(`[WS] Diagnostics: recaptcha=${d.recaptcha}, source=${d.recaptchaSource}, time=${d.recaptchaTime}, grecaptcha=${d.grecaptchaAvailable}, modelAId=${d.modelAId}, template=${d.templateUsed}`);
+                            console.log(`[WS] Diagnostics: recaptcha=${d.recaptcha}, modelAId=${d.modelAId}, template=${d.templateUsed}`);
                         }
-                        // Forward to the main process log
                         if (this.onDiagnostics) {
                             this.onDiagnostics(d);
                         }
                         return;
                     }
 
-                    // Handle status messages (waiting for user trigger, etc.)
+                    // Handle status messages
                     if (msg.type === 'status' && msg.data) {
                         const statusData = msg.data;
                         console.log(`[WS] Status: ${statusData.status} - ${statusData.message || ''}`);
-                        // Forward to the main process
                         if (this.onStatus) {
                             this.onStatus(statusData);
                         }
@@ -250,7 +456,6 @@ class ProxyServer {
                     // Request response: { request_id, data }
                     if (msg.request_id && msg.data !== undefined) {
                         const requestId = msg.request_id;
-                        // Find the client holding this request
                         for (const [, client] of this.wsClients) {
                             const handler = client.activeRequests.get(requestId);
                             if (handler) {
@@ -270,7 +475,8 @@ class ProxyServer {
                 if (client) {
                     // Cancel all active requests
                     for (const [requestId, handler] of client.activeRequests) {
-                        handler({ error: 'WebSocket client disconnected' });
+                        handler({ t: 'error', s: 'ws', d: 'WebSocket client disconnected' });
+                        handler({ t: 'done', s: 'ws', d: {} });
                     }
                 }
                 this.wsClients.delete(clientId);
@@ -286,87 +492,56 @@ class ProxyServer {
         console.log('[ProxyServer] WebSocket server ready at /ws');
     }
 
-    // ========== Forward requests to the lmarena.ai API via a WebSocket client ==========
-    handleViaWsClient(client, requestId, model, messages, stream, res) {
-        const lastUserMsg = messages.filter(m => m.role === 'user').pop();
-        const messageText = lastUserMsg ? lastUserMsg.content : 'Hello';
-
-        // Resolve modelAId — prefer the UUID mapping, fall back to initialModelAId
-        let modelAId = model;  // use the model name by default
-        if (this.capturedModelData) {
-            const uuidMap = this.capturedModelData.uuidMap || {};
-            const nameMap = this.capturedModelData.nameMap || {};
-
-            // Exact match
-            if (uuidMap[model]) modelAId = uuidMap[model];
-            else if (uuidMap[model.toLowerCase()]) modelAId = uuidMap[model.toLowerCase()];
-            else if (nameMap[model]) modelAId = nameMap[model];
-            else if (nameMap[model.toLowerCase()]) modelAId = nameMap[model.toLowerCase()];
-
-            // Fuzzy match
-            if (modelAId === model) {
-                const normalized = model.toLowerCase().replace(/[-_.\s]/g, '');
-                for (const [key, uuid] of Object.entries(uuidMap)) {
-                    if (key.toLowerCase().replace(/[-_.\s]/g, '') === normalized) {
-                        modelAId = uuid;
-                        break;
-                    }
-                }
-            }
-
-            // If it is still the raw model name, fall back to initialModelAId
-            if (modelAId === model && this.capturedModelData.initialModelAId) {
-                modelAId = this.capturedModelData.initialModelAId;
-            }
-        }
-
+    // ========== Forward requests to arena.ai via a WebSocket client ==========
+    handleViaWsClient(client, requestId, spec, stream, res) {
         const wsMessage = {
             request_id: requestId,
             data: {
-                model: model,
-                modelAId: modelAId,
-                content: messageText
+                model: spec.modelA,
+                modelAId: spec.modelAId,
+                modelB: spec.modelB || '',
+                modelBId: spec.modelBId || '',
+                mode: spec.mode,
+                modality: spec.modality,
+                content: spec.content
             }
         };
 
-        console.log(`[WS] Sending request ${requestId.substring(0, 8)} to client #${client.info.id}, model: ${model}`);
+        console.log(`[WS] Sending request ${requestId.substring(0, 8)} to client #${client.info.id}, model: ${spec.modelA}, mode: ${spec.mode}`);
+
+        const sink = new ArenaEventSink(spec.dual);
 
         if (stream) {
             res.setHeader('Content-Type', 'text/event-stream');
             res.setHeader('Cache-Control', 'no-cache');
             res.setHeader('Connection', 'keep-alive');
 
-            // Register the response handler
             client.activeRequests.set(requestId, (data) => {
-                if (data && typeof data === 'object' && data.error) {
+                if (data && typeof data === 'object' && data.error && !data.t) {
+                    // Legacy error shape { error }
+                    sink.ingest({ t: 'error', s: 'ws', d: data.error });
                     res.write(`data: ${JSON.stringify({ error: data.error })}\n\n`);
                     client.activeRequests.delete(requestId);
                     res.end();
                     return;
                 }
 
-                if (data === '[DONE]') {
+                const legacyText = this._legacyEventToText(data);
+                const actions = legacyText !== null ? sink.ingest(legacyText) : sink.ingest(data);
+
+                for (const a of actions) this._writeSseAction(res, requestId, spec.modelA, a);
+
+                if (sink.error) {
+                    res.write(`data: ${JSON.stringify({ error: sink.error })}\n\n`);
+                    client.activeRequests.delete(requestId);
+                    res.end();
+                    return;
+                }
+                if (sink.done) {
+                    this._writeSseFinal(res, requestId, spec.modelA, sink);
                     res.write('data: [DONE]\n\n');
                     res.end();
                     client.activeRequests.delete(requestId);
-                    return;
-                }
-
-                // Convert lmarena.ai's streamed response to OpenAI SSE format
-                try {
-                    // Try RSC format parsing first (older userscripts send raw RSC data)
-                    const chunks = this._parseLmarenaStream(data);
-                    if (chunks.length > 0) {
-                        for (const chunk of chunks) {
-                            res.write(`data: ${JSON.stringify(chunk)}\n\n`);
-                        }
-                    } else if (typeof data === 'string' && data.length > 0) {
-                        // Newer userscript versions send plain-text content directly
-                        res.write(`data: ${JSON.stringify({ id: requestId, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model: '', choices: [{ index: 0, delta: { content: data }, finish_reason: null }] })}\n\n`);
-                    }
-                } catch (e) {
-                    // On parse failure, pass the data through as-is
-                    res.write(`data: ${JSON.stringify({ id: requestId, choices: [{ delta: { content: data }, finish_reason: null }] })}\n\n`);
                 }
             });
 
@@ -376,35 +551,29 @@ class ProxyServer {
                 client.activeRequests.delete(requestId);
                 res.status(503).json({ error: 'WebSocket send failed: ' + e.message });
             }
+
+            // Stream timeout safety net
+            setTimeout(() => {
+                if (client.activeRequests.has(requestId)) {
+                    client.activeRequests.delete(requestId);
+                    try {
+                        this._writeSseFinal(res, requestId, spec.modelA, sink);
+                        res.write('data: [DONE]\n\n');
+                        res.end();
+                    } catch (e) {}
+                }
+            }, 150000);
         } else {
-            // Non-streaming: collect all data and return it at once
-            let fullContent = '';
-            let chunkError = null;
-
+            // Non-streaming: collect everything, then respond
             client.activeRequests.set(requestId, (data) => {
-                if (data && typeof data === 'object' && data.error) {
-                    chunkError = data.error;
+                if (data && typeof data === 'object' && data.error && !data.t) {
+                    sink.ingest({ t: 'error', s: 'ws', d: data.error });
                     client.activeRequests.delete(requestId);
                     return;
                 }
-
-                if (data === '[DONE]') {
-                    client.activeRequests.delete(requestId);
-                    return;
-                }
-
-                // Extract text content from lmarena.ai stream data
-                try {
-                    const text = this._extractTextFromLmarenaChunk(data);
-                    if (text) {
-                        fullContent += text;
-                    } else if (typeof data === 'string' && data.length > 0) {
-                        // Newer userscript versions send plain-text content directly
-                        fullContent += data;
-                    }
-                } catch (e) {
-                    // Ignore unparseable chunks
-                }
+                const legacyText = this._legacyEventToText(data);
+                if (legacyText !== null) sink.ingest(legacyText); else sink.ingest(data);
+                if (sink.done || sink.error) client.activeRequests.delete(requestId);
             });
 
             try {
@@ -414,29 +583,17 @@ class ProxyServer {
                 return res.status(503).json({ error: 'WebSocket send failed: ' + e.message });
             }
 
-            // Wait for the request to complete (watch for this requestId being removed from activeRequests)
             const checkInterval = setInterval(() => {
                 if (!client.activeRequests.has(requestId)) {
                     clearInterval(checkInterval);
-                    if (chunkError) {
-                        res.status(500).json({ error: chunkError });
+                    if (sink.error) {
+                        res.status(500).json({ error: sink.error });
                     } else {
-                        res.json({
-                            id: requestId,
-                            object: 'chat.completion',
-                            created: Math.floor(Date.now() / 1000),
-                            model: model,
-                            choices: [{
-                                index: 0,
-                                message: { role: 'assistant', content: fullContent || '(The model returned an empty response)' },
-                                finish_reason: 'stop'
-                            }]
-                        });
+                        res.json(this._buildCompletionJson(requestId, spec.modelA, sink));
                     }
                 }
             }, 200);
 
-            // 150-second timeout (hijack mode requires waiting for the user to press Enter in the browser)
             setTimeout(() => {
                 if (client.activeRequests.has(requestId)) {
                     clearInterval(checkInterval);
@@ -447,66 +604,136 @@ class ProxyServer {
         }
     }
 
-    // ========== Parse lmarena.ai's streamed response format ==========
-    _parseLmarenaStream(rawData) {
-        const results = [];
-        const requestId = randomUUID();
+    // Raw arena events ready for the pipeline — also usable from the main process (Test button)
+    collectCompletion(spec) {
+        this._resolveSpec(spec);
+        const wsClient = this.getNextWsClient();
+        const sink = new ArenaEventSink(spec.dual);
 
-        // lmarena.ai uses the Next.js Server Actions streaming format, like:
-        // 0:"text"\n
-        // 1:{"data":...}\n
-        // Each line has the format: <type>:<json_value>
-        const lines = rawData.split('\n');
+        return new Promise((resolve, reject) => {
+            const finish = () => resolve(sink);
 
-        for (const line of lines) {
-            if (!line || line.trim().length === 0) continue;
-
-            try {
-                // Try parsing the type:value format
-                const colonIdx = line.indexOf(':');
-                if (colonIdx > 0) {
-                    const type = line.substring(0, colonIdx);
-                    const value = line.substring(colonIdx + 1);
-
-                    if (type === '0') {
-                        // Text stream: 0:"content" — extract the text inside the quotes
-                        const text = JSON.parse(value);
-                        if (typeof text === 'string' && text.length > 0) {
-                            results.push({
-                                id: requestId,
-                                object: 'chat.completion.chunk',
-                                created: Math.floor(Date.now() / 1000),
-                                choices: [{ index: 0, delta: { content: text }, finish_reason: null }]
-                            });
-                        }
+            if (wsClient) {
+                const requestId = randomUUID();
+                wsClient.activeRequests.set(requestId, (data) => {
+                    if (data && typeof data === 'object' && data.error && !data.t) {
+                        sink.ingest({ t: 'error', s: 'ws', d: data.error });
+                        wsClient.activeRequests.delete(requestId);
+                        finish();
+                        return;
                     }
+                    const legacyText = this._legacyEventToText(data);
+                    if (legacyText !== null) sink.ingest(legacyText); else sink.ingest(data);
+                    if (sink.done || sink.error) {
+                        wsClient.activeRequests.delete(requestId);
+                        finish();
+                    }
+                });
+                try {
+                    wsClient.ws.send(JSON.stringify({
+                        request_id: requestId,
+                        data: {
+                            model: spec.modelA,
+                            modelAId: spec.modelAId,
+                            modelB: spec.modelB || '',
+                            modelBId: spec.modelBId || '',
+                            mode: spec.mode,
+                            modality: spec.modality,
+                            content: spec.content
+                        }
+                    }));
+                } catch (e) {
+                    wsClient.activeRequests.delete(requestId);
+                    reject(new Error('WebSocket send failed: ' + e.message));
                 }
-            } catch (e) {
-                // Skip lines that cannot be parsed
+                setTimeout(() => {
+                    if (wsClient.activeRequests.has(requestId)) {
+                        wsClient.activeRequests.delete(requestId);
+                        finish(); // resolve with whatever was collected
+                    }
+                }, 150000);
+            } else {
+                this.browserManager.executeArenaRequest(spec, (evt) => {
+                    sink.ingest(evt);
+                    if (sink.done || sink.error) finish();
+                }).catch((e) => {
+                    sink.ingest({ t: 'error', s: 'exec', d: e.message || String(e) });
+                    finish();
+                });
             }
-        }
-
-        return results;
+        });
     }
 
-    _extractTextFromLmarenaChunk(rawData) {
-        let text = '';
-        const lines = rawData.split('\n');
-        for (const line of lines) {
-            if (!line || line.trim().length === 0) continue;
-            try {
-                const colonIdx = line.indexOf(':');
-                if (colonIdx > 0) {
-                    const type = line.substring(0, colonIdx);
-                    const value = line.substring(colonIdx + 1);
-                    if (type === '0') {
-                        const parsed = JSON.parse(value);
-                        if (typeof parsed === 'string') text += parsed;
-                    }
-                }
-            } catch (e) {}
-        }
-        return text;
+    // ========== Internals ==========
+
+    _collectViaBrowser(spec) {
+        const sink = new ArenaEventSink(spec.dual);
+        return new Promise((resolve) => {
+            this.browserManager.executeArenaRequest(spec, (evt) => {
+                sink.ingest(evt);
+                if (sink.done || sink.error) resolve(sink);
+            }).catch((e) => {
+                sink.ingest({ t: 'error', s: 'exec', d: e.message || String(e) });
+                resolve(sink);
+            });
+            // Safety timeout
+            setTimeout(() => resolve(sink), 150000);
+        });
+    }
+
+    // Convert legacy userscript payloads (plain text / RSC text lines) to a text delta string;
+    // returns null when the payload is a structured arena event ({t, s, d})
+    _legacyEventToText(data) {
+        if (data == null) return null;
+        if (typeof data === 'string') return data; // plain delta or [DONE]
+        if (typeof data === 'object' && typeof data.t === 'string') return null; // structured event
+        return null;
+    }
+
+    _writeSseAction(res, requestId, model, action) {
+        const delta = action.kind === 'reasoning'
+            ? { reasoning_content: action.delta }
+            : { content: action.delta };
+        res.write(`data: ${JSON.stringify({
+            id: requestId,
+            object: 'chat.completion.chunk',
+            created: Math.floor(Date.now() / 1000),
+            model: model,
+            choices: [{ index: 0, delta, finish_reason: null }]
+        })}\n\n`);
+    }
+
+    _writeSseFinal(res, requestId, model, sink) {
+        const chunk = {
+            id: requestId,
+            object: 'chat.completion.chunk',
+            created: Math.floor(Date.now() / 1000),
+            model: model,
+            choices: [{ index: 0, delta: {}, finish_reason: sink.finishReasonSafe }]
+        };
+        if (sink.usage) chunk.usage = sink.usage;
+        res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+    }
+
+    _buildCompletionJson(requestId, model, sink) {
+        const message = {
+            role: 'assistant',
+            content: sink.content || '(The model returned an empty response)'
+        };
+        if (sink.reasoning) message.reasoning_content = sink.reasoning;
+        const json = {
+            id: requestId,
+            object: 'chat.completion',
+            created: Math.floor(Date.now() / 1000),
+            model: model,
+            choices: [{
+                index: 0,
+                message,
+                finish_reason: sink.finishReasonSafe
+            }]
+        };
+        if (sink.usage) json.usage = sink.usage;
+        return json;
     }
 
     // ========== WebSocket client management ==========
@@ -580,4 +807,4 @@ class ProxyServer {
     }
 }
 
-module.exports = { ProxyServer };
+module.exports = { ProxyServer, ArenaEventSink };

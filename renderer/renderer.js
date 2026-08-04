@@ -393,6 +393,10 @@ async function loadConfig() {
         var hp = document.getElementById('http-port'), ak = document.getElementById('api-key-input');
         if (hp) hp.value = config.httpPort || 61001;
         if (ak) ak.value = config.apiKey || '';
+        var hl = document.getElementById('headless-mode');
+        if (hl) hl.checked = config.headless !== false; // headless is the default
+        var dm = document.getElementById('default-mode');
+        if (dm) dm.value = config.defaultMode || 'direct';
 
         var apiUrlEl = document.getElementById('api-url');
         var apiKeyEl = document.getElementById('api-key');
@@ -406,7 +410,9 @@ if (configForm) configForm.addEventListener('submit', async function (e) {
     e.preventDefault();
     var nc = {
         httpPort: parseInt(document.getElementById('http-port').value, 10),
-        apiKey: document.getElementById('api-key-input').value.trim()
+        apiKey: document.getElementById('api-key-input').value.trim(),
+        headless: !!(document.getElementById('headless-mode') && document.getElementById('headless-mode').checked),
+        defaultMode: (document.getElementById('default-mode') && document.getElementById('default-mode').value) || 'direct'
     };
     try {
         await window.api.updateConfig(nc);
@@ -701,7 +707,7 @@ async function runTest() {
     testSendBtn.disabled = true;
     testSendBtn.innerHTML = '<svg class="spin" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/></svg> Testing';
     testResult.className = 'test-result loading';
-    testResult.textContent = '➡ Sending request to ' + model + '...\n\n(You need to create a browser instance and log in first)';
+    testResult.textContent = '➡ Sending request to ' + model + '...\n\nRuns through the connected Tampermonkey page or a hidden instance — no manual steps needed.';
 
     console.log('[Renderer] runTest() → model:', model, 'message:', message);
 
@@ -709,8 +715,13 @@ async function runTest() {
         var result = await window.api.testModel(model, message);
         console.log('[Renderer] runTest ← success, content length:', (result.content || '').length);
         testResult.className = 'test-result';
-        testResult.textContent = result.content || '(Empty response)';
-        addLog('Model test succeeded: ' + result.model, 'info');
+        var out = '';
+        if (result.reasoning && String(result.reasoning).trim()) {
+            out += '\u{1F4AD} Reasoning:\n' + result.reasoning + '\n\n———————————\n\n';
+        }
+        out += result.content || '(Empty response)';
+        testResult.textContent = out;
+        addLog('Model test succeeded: ' + result.model + (result.mode ? ' (mode: ' + result.mode + ')' : ''), 'info');
     } catch (err) {
         console.error('[Renderer] runTest error:', err);
         testResult.className = 'test-result error';
@@ -1059,20 +1070,16 @@ window.api.onServiceStatus(function (st) {
 });
 window.api.onServiceError(function (err) { addLog('Service error: ' + err, 'error'); });
 
-// ========== Request hijack status listener ==========
+// ========== Status updates from the connected page while a request runs ==========
 window.api.onHijackStatus(function (data) {
-    if (data.status === 'waiting_for_trigger' && testResult) {
+    if (!testResult) return;
+    if (data.status === 'executing') {
         testResult.className = 'test-result loading';
-        if (data.message && data.message.includes('auto-submit')) {
-            testResult.textContent = '⏳ The message has been filled into the browser input box — auto-submitting and listening for the response...\n\nIf auto-submit fails, press Enter manually in the browser.\nNote: the model selected in the app replaces the model in the browser.';
-        } else if (data.message && data.message.includes('filled')) {
-            testResult.textContent = '⏳ The message has been filled into the browser input box!\n\nPress Enter on the lmarena.ai page to send it —\nthe proxy will automatically hijack the request and replace it with the test content.';
-        } else {
-            testResult.textContent = '⏳ Waiting for browser interaction...\n\nSend any message on the lmarena.ai page —\nthe proxy will automatically hijack the request for testing.';
-        }
-    } else if (data.status === 'auto_submit_429' && testResult) {
+        testResult.textContent = '⏳ ' + (data.message || 'Running the request on the page...') + '\n\nStreaming is supported — the first tokens should arrive shortly.';
+    } else if (data.status === 'waiting_for_trigger') {
+        // Legacy userscript (pre-v10) — advise updating the Tampermonkey script
         testResult.className = 'test-result loading';
-        testResult.textContent = '⚠️ Auto-submit was rejected by reCAPTCHA (429)\n\nPress Enter manually on the lmarena.ai page to send the message —\nthe proxy will hijack the request using your real interaction.';
+        testResult.textContent = '⚠️ The browser is running an outdated Tampermonkey script.\n\nReplace LMArena.js in Tampermonkey with the new version from the project — requests will then run without manual steps.';
     }
 });
 

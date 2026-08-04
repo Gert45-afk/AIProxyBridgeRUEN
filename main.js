@@ -14,7 +14,9 @@ let isQuitting = false;
 // Configuration
 const CONFIG = {
     httpPort: 61001,
-    apiKey: '123456'
+    apiKey: '123456',
+    headless: true,          // hidden browser instances (no window pops up)
+    defaultMode: 'direct'    // default arena chat mode: direct | battle | side-by-side | agent
 };
 
 // ========== Application menu ==========
@@ -174,7 +176,7 @@ async function startServices() {
         if (!browserManager) {
             browserManager = new BrowserManager();
         }
-        await browserManager.init();  // init is idempotent (path caching, script injection, etc.)
+        await browserManager.init({ headless: CONFIG.headless });  // init is idempotent (path caching, script injection, etc.)
 
         // If an old proxyServer still exists, make sure it is fully stopped first
         if (proxyServer) {
@@ -184,7 +186,7 @@ async function startServices() {
             await new Promise(r => setTimeout(r, 500));
         }
 
-        proxyServer = new ProxyServer(CONFIG.httpPort, browserManager, CONFIG.apiKey);
+        proxyServer = new ProxyServer(CONFIG.httpPort, browserManager, CONFIG.apiKey, { defaultMode: CONFIG.defaultMode });
 
         // Notify the renderer when a WebSocket client connects/disconnects
         proxyServer.onWsClientChange = (clientList) => {
@@ -243,6 +245,9 @@ ipcMain.handle('get-config', () => CONFIG);
 
 ipcMain.handle('update-config', (event, newConfig) => {
     Object.assign(CONFIG, newConfig);
+    // Apply hot-reloadable options without a full restart
+    try { browserManager && browserManager.setOptions({ headless: CONFIG.headless }); } catch (e) {}
+    try { proxyServer && proxyServer.setOptions({ defaultMode: CONFIG.defaultMode }); } catch (e) {}
     stopServices().then(() => startServices());
     return CONFIG;
 });
@@ -276,163 +281,26 @@ ipcMain.handle('close-browser-instance', async (event, instanceId) => {
     return result;
 });
 
-// Test model: prefer sending through a WebSocket client, fall back to Puppeteer UI automation
+// Test model: run through the unified completion pipeline (WS userscript first,
+// then the hidden Puppeteer instance). Returns { content, reasoning, model }.
 ipcMain.handle('test-model', async (event, model, message) => {
     if (!proxyServer) throw new Error('Service is not running — start the service first');
 
-    const requestId = randomUUID();
-    const messages = [{ role: 'user', content: message || 'Hello, please introduce yourself in one sentence.' }];
+    const rawModel = String(model || '');
+    const spec = proxyServer.parseModelSpec(rawModel.replace(/~test$/, ''), {});
+    spec.content = message || 'Hello, please introduce yourself in one sentence.';
 
-    // Prefer a WebSocket client
-    const wsClient = proxyServer.getNextWsClient();
-    if (wsClient) {
-        console.log('[Main] test-model via WS client → model:', model, '| client:', wsClient.info.id);
-        return new Promise((resolve, reject) => {
-            let fullContent = '';
-            let error = null;
-            let settled = false;
+    console.log('[Main] test-model → model:', spec.modelA, '| mode:', spec.mode);
 
-            function doResolve(val) { if (!settled) { settled = true; resolve(val); } }
-            function doReject(err) { if (!settled) { settled = true; reject(err); } }
+    const sink = await proxyServer.collectCompletion(spec);
 
-            // Register the response handler
-            wsClient.activeRequests.set(requestId, (data) => {
-                if (data && typeof data === 'object' && data.error) {
-                    error = data.error;
-                    wsClient.activeRequests.delete(requestId);
-                    doReject(new Error(error));
-                    return;
-                }
-
-                if (data === '[DONE]') {
-                    wsClient.activeRequests.delete(requestId);
-                    if (!fullContent.trim()) {
-                        doReject(new Error('The model returned an empty response — make sure you are logged in to lmarena.ai and the model is available'));
-                    } else {
-                        doResolve({ content: fullContent, model });
-                    }
-                    return;
-                }
-
-                // Extract text from streamed data
-                try {
-                    // Try RSC format parsing first (compatible with older versions)
-                    const text = proxyServer._extractTextFromLmarenaChunk(data);
-                    if (text) {
-                        fullContent += text;
-                    } else if (typeof data === 'string' && data.length > 0) {
-                        // Newer userscript versions send plain-text content directly
-                        fullContent += data;
-                    }
-                } catch (e) {}
-            });
-
-            // Send simplified data — the userscript builds the correct Direct-mode request body
-            try {
-                let modelAId = model;  // Use the model name by default
-                if (proxyServer.capturedModelData) {
-                    const uuidMap = proxyServer.capturedModelData.uuidMap || {};
-                    const nameMap = proxyServer.capturedModelData.nameMap || {};
-
-                    // Exact match
-                    if (uuidMap[model]) modelAId = uuidMap[model];
-                    else if (uuidMap[model.toLowerCase()]) modelAId = uuidMap[model.toLowerCase()];
-                    else if (nameMap[model]) modelAId = nameMap[model];
-                    else if (nameMap[model.toLowerCase()]) modelAId = nameMap[model.toLowerCase()];
-
-                    // Fuzzy match
-                    if (modelAId === model) {
-                        const normalized = model.toLowerCase().replace(/[-_.\s]/g, '');
-                        for (const [key, uuid] of Object.entries(uuidMap)) {
-                            if (key.toLowerCase().replace(/[-_.\s]/g, '') === normalized) {
-                                modelAId = uuid;
-                                break;
-                            }
-                        }
-                    }
-
-                    // Fall back to initialModelAId
-                    if (modelAId === model && proxyServer.capturedModelData.initialModelAId) {
-                        modelAId = proxyServer.capturedModelData.initialModelAId;
-                    }
-                }
-
-                wsClient.ws.send(JSON.stringify({
-                    request_id: requestId,
-                    data: {
-                        model: model,
-                        modelAId: modelAId,
-                        content: message || 'Hello, please introduce yourself in one sentence.'
-                    }
-                }));
-                console.log('[Main] test-model WS request sent, model:', model, 'modelAId:', modelAId);
-            } catch (e) {
-                wsClient.activeRequests.delete(requestId);
-                doReject(new Error('WebSocket send failed: ' + e.message));
-            }
-
-            // 150-second timeout (waiting for the user to manually send a message in the browser to trigger the hijack)
-            setTimeout(() => {
-                if (!settled) {
-                    wsClient.activeRequests.delete(requestId);
-                    if (fullContent) {
-                        doResolve({ content: fullContent + '\n[Response truncated]', model });
-                    } else {
-                        doReject(new Error('Request timed out (150 seconds) — press Enter on the lmarena.ai page to send the message'));
-                    }
-                }
-            }, 150000);
-        });
+    if (sink.error) {
+        throw new Error(sink.error);
     }
-
-    // Fall back to Puppeteer browser client mode
-    if (!browserManager || browserManager.pages.length === 0) {
-        throw new Error('No clients available — create a browser instance and log in to lmarena.ai first, or install the Tampermonkey script to connect a WebSocket client');
+    if (!sink.content.trim() && !sink.reasoning.trim()) {
+        throw new Error('The model returned an empty response — update the Tampermonkey script, or log in a hidden instance by importing session cookies');
     }
-
-    console.log('[Main] test-model via Puppeteer → model:', model, '| pages:', browserManager.pages.length);
-
-    return new Promise((resolve, reject) => {
-        let fullContent = '';
-        let error = null;
-        let settled = false;
-
-        function doResolve(val) { if (!settled) { settled = true; resolve(val); } }
-        function doReject(err)  { if (!settled) { settled = true; reject(err); } }
-
-        try {
-            browserManager.handleChatCompletion(requestId, model, messages, (chunk) => {
-                if (chunk.error) {
-                    error = chunk.error;
-                    console.error('[Main] test-model chunk error:', error);
-                } else if (chunk.choices && chunk.choices[0] && chunk.choices[0].delta) {
-                    const delta = chunk.choices[0].delta.content || '';
-                    if (delta) fullContent += delta;
-                }
-            }).then(() => {
-                console.log('[Main] test-model completed, fullContent length:', fullContent.length);
-                if (error) doReject(new Error(error));
-                else doResolve({ content: fullContent || '(The model returned an empty response)', model });
-            }).catch((err) => {
-                console.error('[Main] test-model promise rejected:', err.message);
-                doReject(err);
-            });
-        } catch (e) {
-            console.error('[Main] test-model sync error:', e.message);
-            doReject(e);
-        }
-
-        // 90-second timeout
-        setTimeout(() => {
-            if (!settled) {
-                if (fullContent) {
-                    doResolve({ content: fullContent + '\n[Response truncated]', model });
-                } else {
-                    doReject(new Error('Request timed out (no response for 90 seconds) — make sure a browser instance is open and logged in to lmarena.ai'));
-                }
-            }
-        }, 90000);
-    });
+    return { content: sink.content, reasoning: sink.reasoning, model: spec.modelA, mode: spec.mode };
 });
 
 ipcMain.handle('create-browser-instance', async () => {

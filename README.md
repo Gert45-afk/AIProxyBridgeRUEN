@@ -13,8 +13,12 @@ Free access to top-tier AI models (Claude, GPT-4/5, Gemini, DeepSeek, Llama, etc
 
 ## Features | Возможности
 
-- **OpenAI API Compatible | Совместимость с OpenAI API** — Drop-in replacement for any client that supports OpenAI API format (streaming + non-streaming) | Готовая замена для любого клиента, поддерживающего формат OpenAI API (потоковый и обычный режимы)
-- **Dual Connection Modes | Два режима подключения** — Tampermonkey WebSocket client (recommended) or Puppeteer browser automation | WebSocket-клиент Tampermonkey (рекомендуется) или автоматизация браузера через Puppeteer
+- **OpenAI API Compatible | Совместимость с OpenAI API** — Drop-in replacement for any client that supports OpenAI API format (true SSE streaming + non-streaming) | Готовая замена для любого клиента, поддерживающего формат OpenAI API (настоящий SSE-стриминг и обычный режим)
+- **Reasoning / "Thoughts" | Рассуждения («мысли»)** — Thinking models stream their reasoning as `reasoning_content` deltas (DeepSeek-style), visible in compatible clients | «Думающие» модели отдают ход рассуждений потоком как `reasoning_content` (в стиле DeepSeek) — видно в совместимых клиентах
+- **All Arena Chat Modes | Все режимы чата Arena** — Direct, Battle, Side-by-side and Agent (experimental), selectable per request via model suffixes (`model~battle`, `modelA~vs~modelB`, `model~agent`) or a `mode` field | Direct, Battle, Side-by-side и Agent (экспериментально) — выбор для каждого запроса суффиксом модели (`model~battle`, `modelA~vs~modelB`, `model~agent`) или полем `mode`
+- **Direct In-page Requests | Прямые запросы со страницы** — Requests run inside the arena.ai page itself (same-origin `fetch` to `create-evaluation`) — no DOM scraping, no Enter simulation, real token-by-token streaming | Запросы выполняются внутри самой страницы arena.ai (same-origin `fetch` к `create-evaluation`) — без скрапинга DOM и симуляции Enter, настоящий поток токенов
+- **Headless Instances | Скрытые инстансы** — Puppeteer sessions run hidden by default: import session cookies once and requests work with no browser window at all | Сессии Puppeteer по умолчанию скрытые: один раз импортируйте session-cookies — и запросы работают вообще без открытия окна браузера
+- **Dual Connection Modes | Два режима подключения** — Tampermonkey WebSocket client (recommended) or a hidden Puppeteer instance (auto-created with imported cookies) | WebSocket-клиент Tampermonkey (рекомендуется) или скрытый инстанс Puppeteer (создаётся автоматически при наличии импортированных cookies)
 - **300+ Models | Более 300 моделей** — Automatically extracts model list from LMArena, grouped by provider (OpenAI, Anthropic, Google, Meta, DeepSeek, Mistral, etc.) | Автоматическое получение списка моделей с LMArena, сгруппированных по провайдерам (OpenAI, Anthropic, Google, Meta, DeepSeek, Mistral и др.)
 - **Model Test Panel | Панель тестирования моделей** — Test any model directly from the app with real-time streaming response | Тестируйте любую модель прямо из приложения с потоковым ответом в реальном времени
 - **Multi-Instance Load Balancing | Балансировка нагрузки между инстансами** — Run multiple browser sessions with round-robin request distribution | Запускайте несколько браузерных сессий с распределением запросов по принципу round-robin
@@ -47,8 +51,8 @@ Free access to top-tier AI models (Claude, GPT-4/5, Gemini, DeepSeek, Llama, etc
 1. The app runs a local HTTP+WebSocket server on port `61001` | Приложение запускает локальный HTTP+WebSocket сервер на порту `61001`
 2. A Tampermonkey userscript in your browser connects via WebSocket | Юзерскрипт Tampermonkey в вашем браузере подключается по WebSocket
 3. When an AI client sends a request to the local API, the proxy forwards it to the userscript | Когда ИИ-клиент отправляет запрос к локальному API, прокси пересылает его юзерскрипту
-4. The userscript hijacks the page's own `fetch` request to LMArena, replacing the model ID and message content | Юзерскрипт перехватывает собственный `fetch`-запрос страницы к LMArena, подменяя ID модели и содержимое сообщения
-5. The response is streamed back through the proxy in OpenAI-compatible format | Ответ передаётся обратно через прокси в OpenAI-совместимом формате
+4. The userscript (or a hidden Puppeteer instance with cookies) sends the real `create-evaluation` request **from inside the arena.ai page** — same-origin HTTPS + the page's own session, with a reCAPTCHA token minted on the spot | Юзерскрипт (или скрытый инстанс Puppeteer с cookies) отправляет настоящий запрос `create-evaluation` **изнутри страницы arena.ai** — same-origin HTTPS + собственная сессия страницы, токен reCAPTCHA создаётся на месте
+5. The raw arena stream (`a0:` text / `ag:` reasoning / `ad:` finish+usage lines) is parsed token-by-token and forwarded as OpenAI SSE (`delta.content` and `delta.reasoning_content`) | Сырой поток арены (строки `a0:` текст / `ag:` рассуждения / `ad:` завершение+usage) разбирается потокенно и пересылается как OpenAI SSE (`delta.content` и `delta.reasoning_content`)
 
 ---
 
@@ -127,11 +131,29 @@ curl http://127.0.0.1:61001/v1/chat/completions \
   -H "Authorization: Bearer 123456" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-3-5-sonnet-20241022",
+    "model": "Claude Sonnet 4.5",
     "messages": [{"role": "user", "content": "Hello!"}],
     "stream": true
   }'
 ```
+
+### Chat Modes & Model Suffixes | Режимы чата и суффиксы моделей
+
+Select the arena chat mode per request via the `model` field suffix (or explicit body fields): | Режим чата выбирается для каждого запроса суффиксом в поле `model` (или явными полями тела):
+
+| Model value | Значение model | Mode | Режим |
+|---|---|---|---|
+| `GPT-5.2` | `GPT-5.2` | direct (default) | direct (по умолчанию) |
+| `GPT-5.2~direct` | `GPT-5.2~direct` | direct | direct |
+| `GPT-5.2~battle` | `GPT-5.2~battle` | battle (two anonymous models) | battle (две анонимные модели) |
+| `GPT-5.2~vs~Claude Sonnet 4.5` | `GPT-5.2~vs~Claude Sonnet 4.5` | side-by-side | side-by-side |
+| `GPT-5.2~agent` | `GPT-5.2~agent` | agent (experimental) | agent (экспериментально) |
+
+You can also send explicit fields: `"mode": "side-by-side"`, `"modelB": "o3"`. | Можно также передавать явные поля: `"mode": "side-by-side"`, `"modelB": "o3"`.
+
+- Battle/side-by-side answers are combined in one message with `**Model A:**` / `**Model B:**` labels. | Ответы battle/side-by-side объединяются в одно сообщение с метками `**Model A:**` / `**Model B:**`.
+- Thinking models emit their reasoning as `delta.reasoning_content` chunks and `message.reasoning_content` in non-streaming replies. | «Думающие» модели отдают рассуждения чанками `delta.reasoning_content`, а в обычном ответе — полем `message.reasoning_content`.
+- Challenge-free reCAPTCHA: a token is minted inside the browser page per request; HTTP 429/403 is retried once automatically. | reCAPTCHA без ручных действий: токен создаётся внутри страницы браузера на каждый запрос; при HTTP 429/403 выполняется один автоматический повтор.
 
 ---
 
