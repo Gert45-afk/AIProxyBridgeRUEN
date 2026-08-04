@@ -117,6 +117,25 @@ class BrowserManager {
         return null;
     }
 
+    // Navigate to LMArena with retries (site may redirect lmarena.ai -> arena.ai,
+    // first attempt can also fail on slow networks)
+    async navigateToArena(page, timeout = 45000) {
+        const targets = ['https://lmarena.ai/?mode=direct', 'https://arena.ai/?mode=direct'];
+        for (let i = 0; i < 3; i++) {
+            const url = targets[Math.min(i, targets.length - 1)];
+            try {
+                await page.goto(url, { waitUntil: 'domcontentloaded', timeout });
+                return true;
+            } catch (e) {
+                const cur = (typeof page.url === 'function') ? (page.url() || '') : '';
+                if (cur.includes('arena.ai') || cur.includes('lmarena.ai')) return true;
+                console.log(`[BrowserManager] Navigation to ${url} failed (attempt ${i + 1}/3): ${e.message}`);
+                await sleep(1500);
+            }
+        }
+        return false;
+    }
+
     // ========== Core: send messages and get responses by driving the page UI ==========
 
     async handleChatCompletion(requestId, model, messages, onChunk) {
@@ -138,10 +157,7 @@ class BrowserManager {
             const currentUrl = page.url();
             if (!currentUrl.includes('lmarena.ai') && !currentUrl.includes('arena.ai')) {
                 console.log('[BrowserManager] Navigating to lmarena.ai...');
-                await page.goto('https://lmarena.ai/?mode=direct', {
-                    waitUntil: 'domcontentloaded',
-                    timeout: 30000
-                });
+                await this.navigateToArena(page, 30000);
                 await sleep(2000);
             }
 
@@ -191,10 +207,7 @@ class BrowserManager {
                 await sleep(1000);
             } else {
                 // Navigate to direct mode to start a new chat
-                await page.goto('https://lmarena.ai/?mode=direct', {
-                    waitUntil: 'domcontentloaded',
-                    timeout: 30000
-                });
+                await this.navigateToArena(page, 30000);
                 await sleep(2000);
                 console.log('[BrowserManager] Navigated to new chat');
             }
@@ -576,19 +589,13 @@ class BrowserManager {
             });
         });
 
-        // Navigate to lmarena.ai
-        try {
-            await page.goto('https://lmarena.ai/?mode=direct', {
-                waitUntil: 'domcontentloaded',
-                timeout: 60000
-            });
-        } catch (navErr) {
-            const currentUrl = page.url();
-            if (currentUrl.includes('arena.ai') || currentUrl.includes('lmarena.ai')) {
-                console.log(`[BrowserManager] Navigation completed: ${currentUrl}`);
-            } else {
-                console.error(`[BrowserManager] Navigation error: ${navErr.message}`);
-            }
+        // Navigate to LMArena (with retries; falls back to arena.ai)
+        await this.navigateToArena(page, 45000);
+        const landedUrl = page.url();
+        if (!landedUrl || landedUrl.startsWith('about:')) {
+            console.error('[BrowserManager] Page is still blank after navigation attempts — check your internet connection or VPN/proxy');
+        } else {
+            console.log(`[BrowserManager] Instance landed on: ${landedUrl}`);
         }
 
         const instanceInfo = {
