@@ -268,18 +268,27 @@
         return uuid7();
     }
 
+    // ========== Model slug patterns (shared by all extractors) ==========
+    // Extended vendor coverage — keep in sync with browser-manager.js parseModelsFromHTML()
+    const MODEL_SLUG_ALT = 'claude-[a-z0-9._\\-]+|gpt-[a-z0-9._\\-]+|chatgpt-[a-z0-9._\\-]+|gpt-oss-[a-z0-9._\\-]+|o[0-9]+(?:-[a-z0-9._\\-]+)?|gemini-[a-z0-9._\\-]+|gemma-[a-z0-9._\\-]+|imagen-[a-z0-9._\\-]+|veo-[a-z0-9._\\-]+|nano-banana[a-z0-9._\\-]*|llama-[a-z0-9._\\-]+|meta-llama[a-z0-9._\\-]*|deepseek-[a-z0-9._\\-]+|qwen[a-z0-9._\\-]*|qwq[a-z0-9._\\-]*|mistral-[a-z0-9._\\-]+|mixtral[a-z0-9._\\-]*|pixtral[a-z0-9._\\-]*|ministral[a-z0-9._\\-]*|codestral[a-z0-9._\\-]*|devstral[a-z0-9._\\-]*|grok[a-z0-9._\\-]*|glm-[a-z0-9._\\-]+|chatglm[0-9][a-z0-9._\\-]*|ernie-[a-z0-9._\\-]+|kimi[a-z0-9._\\-]*|moonshot-[a-z0-9._\\-]+|phi-[a-z0-9._\\-]+|phi[0-9][a-z0-9._\\-]*|nova-[a-z0-9._\\-]+|command-[a-z0-9._\\-]+|c4ai-[a-z0-9._\\-]+|aya-[a-z0-9._\\-]+|jamba-[a-z0-9._\\-]+|mercury-[a-z0-9._\\-]*|hunyuan-[a-z0-9._\\-]+|abab[0-9][a-z0-9._\\-]*|minimax-[a-z0-9._\\-]+|mimo-[a-z0-9._\\-]+|step-[a-z0-9._\\-]+|skywork-[a-z0-9._\\-]+|seedream[a-z0-9._\\-]*|wan[0-9][a-z0-9._\\-]*|flux[a-z0-9._\\-]*|ideogram[a-z0-9._\\-]*|longcat-[a-z0-9._\\-]+|dots[.-][a-z0-9._\\-]+|solar-[a-z0-9._\\-]+|lfm[a-z0-9._\\-]*|exaone[a-z0-9._\\-]*|trinity-[a-z0-9._\\-]+|sonar-[a-z0-9._\\-]+|rwkv[0-9][a-z0-9._\\-]*|internlm[a-z0-9._\\-]*|internvl[a-z0-9._\\-]*|yi-[a-z0-9._\\-]+|dall-e-[a-z0-9._\\-]+|dbrx[a-z0-9._\\-]*|vicuna-[a-z0-9._\\-]+|pplx-[a-z0-9._\\-]+|mpt-[a-z0-9._\\-]+|reka-[a-z0-9._\\-]+|nemotron[a-z0-9._\\-]*|falcon[0-9][a-z0-9._\\-]*|aurora[a-z0-9._\\-]*|recraft[a-z0-9._\\-]*|stable-[a-z0-9._\\-]+|sdxl[a-z0-9._\\-]*|mamba-[a-z0-9._\\-]+|kat-[a-z0-9._\\-]+|orion[a-z0-9._\\-]*|lucy-[a-z0-9._\\-]+|whisper-[a-z0-9._\\-]+|tts-[a-z0-9._\\-]+|bge-[a-z0-9._\\-]+';
+    const MODEL_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const MODEL_SLUG_TEST_RE = new RegExp('^(?:' + MODEL_SLUG_ALT + ')$', 'i');
+
+    function looksLikeModelSlug(s) {
+        return typeof s === 'string' && s.length >= 3 && s.length <= 90 && MODEL_SLUG_TEST_RE.test(s);
+    }
+
     // ========== Extract model slugs from the page HTML (most reliable fallback) ==========
     function extractModelsFromPageHTML() {
         const models = [];
         const seen = new Set();
         try {
             const html = document.documentElement.outerHTML;
-            // Same regex as browser-manager.js parseModelsFromHTML()
-            const modelPattern = /(?:"|'|`)(claude-[a-z0-9._\-]+|gpt-[a-z0-9._\-]+|chatgpt-[a-z0-9._\-]+|o[134]-[a-z0-9._\-]+|gemini-[a-z0-9._\-]+|llama-[a-z0-9._\-]+|deepseek-[a-z0-9._\-]+|qwen[a-z0-9._\-]{3,60}|mistral-[a-z0-9._\-]+|grok-[a-z0-9._\-]+|glm-[a-z0-9._\-]+|ernie-[a-z0-9._\-]+|kimi-[a-z0-9._\-]+|gemma-[a-z0-9._\-]+|phi-[a-z0-9._\-]+|codestral[a-z0-9._\-]*|mixtral[a-z0-9._\-]*|pixtral[a-z0-9._\-]*|ministral[a-z0-9._\-]*|c4ai-[a-z0-9._\-]+|command-[a-z0-9._\-]+|dbrx[a-z0-9._\-]*|yi-[a-z0-9._\-]+|dall-e-[a-z0-9._\-]+)(?:"|'|`)/gi;
+            const re = new RegExp('(?:"|\'|`)(' + MODEL_SLUG_ALT + ')(?:"|\'|`)', 'gi');
             let match;
-            while ((match = modelPattern.exec(html)) !== null) {
-                let slug = match[1];
-                if (!slug || slug.length < 4 || slug.length > 80) continue;
+            while ((match = re.exec(html)) !== null) {
+                const slug = match[1];
+                if (!slug || slug.length < 4 || slug.length > 90) continue;
                 if (/^(script|style|class|chunk|webpack|module|next-|__|data-)/.test(slug)) continue;
                 const lower = slug.toLowerCase();
                 if (seen.has(lower)) continue;
@@ -293,142 +302,153 @@
     }
 
     // ========== Extract the model list from RSC flight data ==========
-    // lmarena.ai is a Next.js app — model data is embedded in self.__next_f.push()
+    // LMArena is a Next.js app — model data is embedded in self.__next_f.push()
+    // (and/or window.__NEXT_DATA__). initialModels may be:
+    //   - an array of slugs:      ["gpt-4o", "claude-sonnet-4.5", ...]
+    //   - an array of objects:    [{ id: <uuid>, name/publicName/slug: "..." }]
+    //   - a dict keyed by slug:   { "gpt-4o": {...} }
     function extractModelsFromRSC() {
-        let models = [];
+        const models = [];
+        const seen = new Set();
         let modelAId = '';
-        let allModelData = {};
+
+        function pushSlug(slug) {
+            if (typeof slug !== 'string') return;
+            slug = slug.trim().replace(/^["'`]+|["'`]+$/g, '');
+            if (!slug || slug.length < 3 || slug.length > 90) return;
+            if (/^(script|style|class|chunk|webpack|module|next-|__|data-|http)/i.test(slug)) return;
+            const lower = slug.toLowerCase();
+            if (seen.has(lower)) return;
+            seen.add(lower);
+            models.push(slug);
+        }
+
+        // Normalize array / dict model containers; strict=true filters slugs by pattern
+        function ingestModels(data, strict) {
+            if (!data) return;
+            if (Array.isArray(data)) {
+                for (const item of data) {
+                    if (typeof item === 'string') {
+                        if (!strict || looksLikeModelSlug(item)) pushSlug(item);
+                    } else if (item && typeof item === 'object') {
+                        const uuid = item.id || item.modelId || '';
+                        const name = item.publicName || item.name || item.displayName || '';
+                        const slug = (item.slug || name || '').toString();
+                        if (slug && (!strict || looksLikeModelSlug(slug))) pushSlug(slug);
+                        if (MODEL_UUID_RE.test(uuid)) addModelMapping(slug || name || String(uuid), uuid, name || slug);
+                    }
+                }
+            } else if (data && typeof data === 'object') {
+                for (const [key, val] of Object.entries(data)) {
+                    const isUuidKey = MODEL_UUID_RE.test(key);
+                    const v = (val && typeof val === 'object') ? val : {};
+                    const name = v.publicName || v.name || v.displayName || '';
+                    const slug = (v.slug || (isUuidKey ? name : key) || '').toString();
+                    if (slug && (!strict || looksLikeModelSlug(slug))) pushSlug(slug);
+                    const uuidVal = v.id || v.modelId || '';
+                    if (MODEL_UUID_RE.test(uuidVal)) addModelMapping(slug || key, uuidVal, name || slug || key);
+                    if (isUuidKey && slug) addModelMapping(slug, key, name || slug);
+                }
+            }
+        }
+
+        // Balanced-bracket JSON fragment extractor starting after `key`
+        // (handles both [...] and {...}, aware of strings and escapes)
+        function extractJsonAfterKey(content, key) {
+            let from = 0;
+            while (true) {
+                const idx = content.indexOf(key, from);
+                if (idx === -1) return null;
+                const afterKey = content.substring(idx + key.length);
+                const start = afterKey.search(/[[{]/);
+                if (start === -1 || start > 12) { from = idx + key.length; continue; }
+                const open = afterKey[start];
+                const close = open === '[' ? ']' : '}';
+                let depth = 0, inStr = false, esc = false;
+                for (let i = start; i < afterKey.length; i++) {
+                    const c = afterKey[i];
+                    if (inStr) {
+                        if (esc) esc = false;
+                        else if (c === '\\') esc = true;
+                        else if (c === '"') inStr = false;
+                        continue;
+                    }
+                    if (c === '"') { inStr = true; continue; }
+                    if (c === open) depth++;
+                    else if (c === close) {
+                        depth--;
+                        if (depth === 0) return afterKey.substring(start, i + 1);
+                    }
+                }
+                return null;
+            }
+        }
+
+        function unescapeRsc(s) {
+            if (s.includes('\\"')) s = s.replace(/\\"/g, '"');
+            return s;
+        }
 
         try {
             // Method 1: parse the __next_f.push data in <script> tags
             const scripts = document.querySelectorAll('script');
+            let combinedText = '';
             for (const script of scripts) {
                 const content = script.textContent || '';
-                if (!content.includes('initialModels')) continue;
+                if (!content) continue;
+                if (!(content.includes('initialModels') || content.includes('initialModelAId') || content.includes('__next_f'))) continue;
+                combinedText += '\n' + content.slice(0, 3000000);
 
-                // Extract the initialModels data
-                // RSC format: self.__next_f.push([1,"...initialModels:[...]..."])
-                // Or directly in the HTML: \"initialModels\":[...]
-
-                // Try to parse the escaped JSON
+                // initialModels — array or dict form
                 try {
-                    // Find the data near initialModels
-                    const idx = content.indexOf('initialModels');
-                    if (idx === -1) continue;
-
-                    // Start extracting from initialModels
-                    const afterKey = content.substring(idx + 'initialModels'.length);
-
-                    // Find the start of the array
-                    const arrStart = afterKey.indexOf('[');
-                    if (arrStart === -1 || arrStart > 10) continue;
-
-                    // Manually match brackets to find the end of the array
-                    let depth = 0;
-                    let arrEnd = -1;
-                    for (let i = arrStart; i < afterKey.length; i++) {
-                        if (afterKey[i] === '[') depth++;
-                        else if (afterKey[i] === ']') {
-                            depth--;
-                            if (depth === 0) { arrEnd = i + 1; break; }
+                    let frag = extractJsonAfterKey(content, 'initialModels');
+                    if (frag) {
+                        const before = models.length;
+                        try { ingestModels(JSON.parse(unescapeRsc(frag)), false); } catch (e) {}
+                        if (models.length > before) {
+                            console.log(`[LMArena API] RSC initialModels: found ${models.length - before} models`);
                         }
                     }
+                } catch (e) {}
 
-                    if (arrEnd === -1) continue;
-
-                    let arrStr = afterKey.substring(arrStart, arrEnd);
-
-                    // Handle escaping
-                    if (arrStr.includes('\\"')) {
-                        arrStr = arrStr.replace(/\\"/g, '"').replace(/\\\\/g, '\\');
-                    }
-
-                    const parsed = JSON.parse(arrStr);
-                    if (Array.isArray(parsed) && parsed.length > 0) {
-                        // Check whether it's an array of strings or of objects
-                        if (typeof parsed[0] === 'string') {
-                            models = parsed;
-                            console.log(`[LMArena API] RSC: Found ${models.length} model slugs`);
-                        } else if (typeof parsed[0] === 'object') {
-                            // Array of objects, which may contain UUIDs
-                            for (const m of parsed) {
-                                if (m && m.id) {
-                                    const uuid = m.id;
-                                    const name = m.name || m.slug || '';
-                                    const slug = m.slug || name.toLowerCase().replace(/[\s.]+/g, '-');
-                                    models.push(slug);
-                                    if (/^[0-9a-f]{8}-/i.test(uuid)) {
-                                        addModelMapping(slug, uuid, name);
-                                    }
-                                }
-                            }
-                            console.log(`[LMArena API] RSC: Found ${models.length} model objects with UUIDs`);
-                        }
-                    }
-                } catch (e) {
-                    // Parsing failed — try regex extraction
+                // Other well-known list keys (may also be arrays/dicts)
+                for (const key of ['text_models', 'all_models', 'all_text_models', '"models"']) {
                     try {
-                        const slugMatches = content.matchAll(/"([a-z][a-z0-9_-]{5,50})"/g);
-                        const slugList = [];
-                        for (const m of slugMatches) {
-                            const slug = m[1];
-                            // Filter out strings that look like model slugs
-                            if (/(?:gpt|claude|gemini|llama|deepseek|qwen|mistral|mixtral|grok|command|codestral|pixtral|ministral|dall-e|o[1-4]|c4ai)/.test(slug)) {
-                                if (!slugList.includes(slug)) slugList.push(slug);
-                            }
-                        }
-                        if (slugList.length > models.length) {
-                            models = slugList;
-                            console.log(`[LMArena API] RSC regex: Found ${models.length} model slugs`);
-                        }
-                    } catch (e2) {}
+                        let frag = extractJsonAfterKey(content, key);
+                        if (!frag) continue;
+                        try { ingestModels(JSON.parse(unescapeRsc(frag)), true); } catch (e) {}
+                    } catch (e) {}
                 }
 
-                // Extract initialModelAId
+                // initialModelAId
                 try {
-                    const aidMatch = content.match(/initialModelAId[^"]*"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"/i);
-                    if (aidMatch) {
+                    const aidMatch = content.match(/initialModelAId[^"]*"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"/i)
+                        || content.match(/initialModelAId[^0-9a-fA-F]{0,16}([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
+                    if (aidMatch && !modelAId) {
                         modelAId = aidMatch[1];
                         console.log(`[LMArena API] RSC: Found initialModelAId: ${modelAId}`);
                     }
                 } catch (e) {}
+            }
 
-                // Extract other model data fields
+            // Broad slug scan across the collected RSC text as a safety net
+            if (combinedText) {
                 try {
-                    const dataPatterns = [
-                        /"text_models"\s*:\s*(\[[\s\S]*?\])/,
-                        /"all_models"\s*:\s*(\[[\s\S]*?\])/,
-                        /"all_text_models"\s*:\s*(\[[\s\S]*?\])/,
-                    ];
-                    for (const pattern of dataPatterns) {
-                        const match = content.match(pattern);
-                        if (match) {
-                            try {
-                                let str = match[1];
-                                if (str.includes('\\"')) str = str.replace(/\\"/g, '"').replace(/\\\\/g, '\\');
-                                const parsed = JSON.parse(str);
-                                if (Array.isArray(parsed)) {
-                                    for (const slug of parsed) {
-                                        if (typeof slug === 'string' && !models.includes(slug)) {
-                                            models.push(slug);
-                                        }
-                                    }
-                                }
-                            } catch (e) {}
-                        }
+                    const before = models.length;
+                    const scanRe = new RegExp('(?:[^a-z0-9]|^)(' + MODEL_SLUG_ALT + ')(?![a-z0-9])', 'gi');
+                    for (const m of combinedText.matchAll(scanRe)) pushSlug(m[1]);
+                    if (models.length > before) {
+                        console.log(`[LMArena API] RSC slug scan: ${models.length} models total`);
                     }
                 } catch (e) {}
             }
 
             // Method 2: read the Next.js data directly from window
-            if (models.length === 0 && window.__NEXT_DATA__) {
+            if (window.__NEXT_DATA__) {
                 try {
-                    const nextDataStr = JSON.stringify(window.__NEXT_DATA__);
-                    const modelMatch = nextDataStr.match(/"initialModels"\s*:\s*(\[[^\]]*\])/);
-                    if (modelMatch) {
-                        const parsed = JSON.parse(modelMatch[1]);
-                        if (Array.isArray(parsed)) models = parsed;
-                    }
+                    const str = JSON.stringify(window.__NEXT_DATA__);
+                    let frag = extractJsonAfterKey(str, 'initialModels');
+                    if (frag) { try { ingestModels(JSON.parse(frag), false); } catch (e) {} }
                 } catch (e) {}
             }
 
@@ -439,7 +459,7 @@
         return { models, modelAId };
     }
 
-    // ========== Extract models by clicking the dropdown menu ==========
+    // ========== Extract models by clicking the dropdown menu ========== 
     async function extractModelsViaDropdown() {
         const extracted = [];
 

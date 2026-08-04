@@ -645,13 +645,29 @@ class BrowserManager {
                                 try {
                                     const models = JSON.parse(modelsMatch[1]);
                                     for (const m of models) {
-                                        if (m.id && m.name) {
-                                            results.push({ id: m.id, name: m.name, provider: m.provider || '' });
-                                        } else if (typeof m === 'string') {
+                                        if (typeof m === 'string') {
                                             results.push({ id: m, name: m });
+                                        } else if (m && typeof m === 'object') {
+                                            const nm = m.publicName || m.name || m.displayName || m.slug || m.id;
+                                            const id = (m.id && !/^[0-9a-f]{8}-/.test(m.id)) ? m.id : (m.slug || nm);
+                                            if (id && nm) results.push({ id: String(id), name: String(nm), provider: m.organization || m.provider || '' });
                                         }
                                     }
                                 } catch (e) {}
+                            }
+                            // initialModels may also be a dict keyed by slug (values may hold uuid/publicName)
+                            if (results.length === 0) {
+                                const objMatch = jsonStr.match(/"initialModels"\s*:\s*(\{[\s\S]*?\})\s*,\s*"/);
+                                if (objMatch) {
+                                    try {
+                                        const obj = JSON.parse(objMatch[1]);
+                                        for (const [k, v] of Object.entries(obj)) {
+                                            const val = (v && typeof v === 'object') ? v : {};
+                                            const nm = val.publicName || val.name || k;
+                                            results.push({ id: /^[0-9a-f]{8}-/.test(k) ? String(nm) : k, name: String(nm), provider: val.organization || val.provider || '' });
+                                        }
+                                    } catch (e) {}
+                                }
                             }
                         }
                     } catch (e) {}
@@ -800,7 +816,7 @@ class BrowserManager {
         const models = [];
         const seen = new Set();
         try {
-            const modelPattern = /(?:"|'|`)(claude-[a-z0-9._\-]+|gpt-[a-z0-9._\-]+|chatgpt-[a-z0-9._\-]+|o[134]-[a-z0-9._\-]+|gemini-[a-z0-9._\-]+|llama-[a-z0-9._\-]+|deepseek-[a-z0-9._\-]+|qwen[a-z0-9._\-]{3,60}|mistral-[a-z0-9._\-]+|grok-[a-z0-9._\-]+|glm-[a-z0-9._\-]+|ernie-[a-z0-9._\-]+|kimi-[a-z0-9._\-]+|gemma-[a-z0-9._\-]+|phi-[a-z0-9._\-]+)(?:"|'|`)/gi;
+            const modelPattern = /(?:"|'|`)(claude-[a-z0-9._\-]+|gpt-[a-z0-9._\-]+|chatgpt-[a-z0-9._\-]+|gpt-oss-[a-z0-9._\-]+|o[0-9]+(?:-[a-z0-9._\-]+)?|gemini-[a-z0-9._\-]+|gemma-[a-z0-9._\-]+|imagen-[a-z0-9._\-]+|veo-[a-z0-9._\-]+|nano-banana[a-z0-9._\-]*|llama-[a-z0-9._\-]+|meta-llama[a-z0-9._\-]*|deepseek-[a-z0-9._\-]+|qwen[a-z0-9._\-]*|qwq[a-z0-9._\-]*|mistral-[a-z0-9._\-]+|mixtral[a-z0-9._\-]*|pixtral[a-z0-9._\-]*|ministral[a-z0-9._\-]*|codestral[a-z0-9._\-]*|devstral[a-z0-9._\-]*|grok[a-z0-9._\-]*|glm-[a-z0-9._\-]+|chatglm[0-9][a-z0-9._\-]*|ernie-[a-z0-9._\-]+|kimi[a-z0-9._\-]*|moonshot-[a-z0-9._\-]+|phi-[a-z0-9._\-]+|phi[0-9][a-z0-9._\-]*|nova-[a-z0-9._\-]+|command-[a-z0-9._\-]+|c4ai-[a-z0-9._\-]+|aya-[a-z0-9._\-]+|jamba-[a-z0-9._\-]+|mercury-[a-z0-9._\-]*|hunyuan-[a-z0-9._\-]+|abab[0-9][a-z0-9._\-]*|minimax-[a-z0-9._\-]+|mimo-[a-z0-9._\-]+|step-[a-z0-9._\-]+|skywork-[a-z0-9._\-]+|seedream[a-z0-9._\-]*|wan[0-9][a-z0-9._\-]*|flux[a-z0-9._\-]*|ideogram[a-z0-9._\-]*|longcat-[a-z0-9._\-]+|dots[.-][a-z0-9._\-]+|solar-[a-z0-9._\-]+|lfm[a-z0-9._\-]*|exaone[a-z0-9._\-]*|trinity-[a-z0-9._\-]+|sonar-[a-z0-9._\-]+|rwkv[0-9][a-z0-9._\-]*|internlm[a-z0-9._\-]*|internvl[a-z0-9._\-]*|yi-[a-z0-9._\-]+|dall-e-[a-z0-9._\-]+|dbrx[a-z0-9._\-]*|vicuna-[a-z0-9._\-]+|pplx-[a-z0-9._\-]+|mpt-[a-z0-9._\-]+|reka-[a-z0-9._\-]+|nemotron[a-z0-9._\-]*|falcon[0-9][a-z0-9._\-]*|aurora[a-z0-9._\-]*|recraft[a-z0-9._\-]*|stable-[a-z0-9._\-]+|sdxl[a-z0-9._\-]*|mamba-[a-z0-9._\-]+|kat-[a-z0-9._\-]+|orion[a-z0-9._\-]*|lucy-[a-z0-9._\-]+|whisper-[a-z0-9._\-]+|tts-[a-z0-9._\-]+|bge-[a-z0-9._\-]+)(?:"|'|`)/gi;
             let match;
             while ((match = modelPattern.exec(html)) !== null) {
                 let name = match[1] || match[0].replace(/^['"`]+|['"`]+$/g, '');
