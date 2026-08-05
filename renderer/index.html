@@ -337,8 +337,9 @@
                         Session cookies (skip Google login)
                     </div>
                     <ul>
-                        <li>Export cookies from <code>arena.ai</code> with the <strong>EditThisCookie</strong> extension (JSON format) and paste them below</li>
-                        <li>They are stored only on this PC and applied to new and existing instances — no manual login needed. New instances pick them up automatically</li>
+                        <li>Export cookies from <code>arena.ai</code> with the <strong>EditThisCookie</strong> extension (JSON format) and paste them below — paste the <strong>complete</strong> export (it must start with <code>[{</code> and end with <code>}]</code>)</li>
+                        <li>The export must contain the session cookie <code>arena-auth-prod-v1</code> (or the split pair <code>arena-auth-prod-v1.0</code> / <code>.1</code>) — without it, login cannot work. Watch the Logs after importing: they say whether the auth cookie was found and accepted</li>
+                        <li>No cookies? Requests fall back to an automatic <em>anonymous sign-up</em> (Cloudflare Turnstile + reCAPTCHA) — if that fails in your environment, cookies are the reliable path</li>
                         <li>⚠️ Treat them like a password: never share them or commit them to a repository</li>
                     </ul>
                     <textarea id="cookies-input" class="cookies-input" spellcheck="false" placeholder='[{"name":"arena-auth-prod-v1.0","value":"...","domain":"arena.ai"}, ...]'></textarea>
@@ -425,8 +426,9 @@
             <div class="help-section">
                 <h4>FAQ</h4>
                 <ul>
-                    <li><strong>Empty replies?</strong> — Update the Tampermonkey script to v10, or import session cookies so a hidden instance can log in</li>
-                    <li><strong>429 errors (rate limit)?</strong> — The request is retried once automatically with a fresh reCAPTCHA token; if it persists, create a new instance to switch sessions</li>
+                    <li><strong>HTTP 500 from arena?</strong> — That usually means there is no session. The app tries an automatic anonymous sign-up (watch the Logs); if Turnstile is blocked in your environment, import fresh session cookies instead</li>
+                    <li><strong>Empty replies?</strong> — Update the Tampermonkey script to v10.3, or import session cookies so a hidden instance can log in</li>
+                    <li><strong>429 / 403 errors?</strong> — The request is retried automatically with a fresh reCAPTCHA token (and a rotated sitekey for 403); if it persists, create a new instance to switch sessions</li>
                     <li><strong>Service won't start?</strong> — Check if the port is already in use (quit other app copies from the tray); you can change it in Configuration</li>
                     <li><strong>How to update?</strong> — git pull or download the latest version, then rebuild</li>
                 </ul>

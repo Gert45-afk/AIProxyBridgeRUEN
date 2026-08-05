@@ -161,6 +161,15 @@ class BrowserManager {
             await sleep(1500);
         }
 
+        // Auth probe once per instance — makes the Logs pane tell the truth about login
+        if (!page.__arenaAuthLogged) {
+            page.__arenaAuthLogged = true;
+            const probe = await this.probeAuth(page);
+            console.log(probe.authed
+                ? `[BrowserManager] Request starts with an authenticated arena session (${probe.detail})`
+                : `[BrowserManager] Request starts anonymously (${probe.detail}) — if arena refuses, an automatic sign-up will be attempted`);
+        }
+
         // Wait for the arena executor (injected via evaluateOnNewDocument or on demand)
         let done = false;
         let resolved = false;
@@ -168,6 +177,17 @@ class BrowserManager {
 
         const wrappedPush = (evt) => {
             try {
+                // meta events carry diagnostics (attempts, retries, sign-up stages) → app Logs
+                if (evt && evt.t === 'meta') {
+                    console.log(`[Arena ${evt.s || 'meta'}]`, typeof evt.d === 'string' ? evt.d : JSON.stringify(evt.d));
+                    if (evt.s === 'signup' && typeof evt.d === 'string') {
+                        if (evt.d.includes('Turnstile widget')) this._assistTurnstileClicks(page);
+                        if (evt.d.includes('got Turnstile token') || evt.d.includes('failed') || evt.d.includes('error') || evt.d.includes('sign-up OK')) {
+                            page.__turnstileAssistStop = true;
+                        }
+                    }
+                    return;
+                }
                 if (evt && evt.t === 'done') finish();
                 push(evt);
             } catch (e) {}
@@ -194,6 +214,31 @@ class BrowserManager {
             alivePush({ t: 'done', s: opts.mode || 'direct', d: { failed: true } });
         });
         clearTimeout(watchdog);
+    }
+
+    // Best-effort: click the Turnstile iframe while the page waits for a token.
+    // Headless Chrome often passes Turnstile without interaction, but a few real
+    // mouse clicks on the widget raise the success rate noticeably.
+    _assistTurnstileClicks(page) {
+        if (page.__turnstileAssistActive) return;
+        page.__turnstileAssistActive = true;
+        (async () => {
+            const deadline = Date.now() + 40000;
+            while (Date.now() < deadline && !page.__turnstileAssistStop) {
+                try {
+                    const frames = await page.$$('iframe[src*="challenges.cloudflare.com"]');
+                    for (const f of frames) {
+                        try {
+                            const box = await f.boundingBox();
+                            if (box) await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+                        } catch (e) {}
+                    }
+                } catch (e) {}
+                await sleep(2500);
+            }
+            page.__turnstileAssistActive = false;
+            page.__turnstileAssistStop = false;
+        })();
     }
 
     // Ensure at least one instance exists (lazy auto-create — used when cookies
@@ -308,22 +353,14 @@ class BrowserManager {
             console.log(`[BrowserManager] Instance landed on: ${landedUrl}`);
         }
 
-        // Login probe: is the readable arena auth cookie present after cookie import?
-        let authProbe = 'no-cookies';
-        try {
-            authProbe = await page.evaluate(() => {
-                try {
-                    return document.cookie.includes('arena-auth-prod') ? 'auth-cookie-present'
-                        : (document.cookie ? 'foreign-cookies-only' : 'no-cookies');
-                } catch (e) { return 'unknown'; }
-            });
-        } catch (e) {}
-        if (authProbe === 'auth-cookie-present') {
-            console.log('[BrowserManager] Login check: arena auth cookie IS present — the instance is authenticated');
+        // Login probe (Node-side, sees httpOnly cookies): is the arena auth cookie there?
+        const authProbe = await this.probeAuth(page);
+        if (authProbe.authed) {
+            console.log(`[BrowserManager] Login check: auth cookie IS present (${authProbe.detail}) — the instance is authenticated`);
         } else if (this.cookies && this.cookies.length > 0) {
-            console.warn(`[BrowserManager] Login check: arena auth cookie NOT readable after import (${authProbe}). Note: the auth cookie may be httpOnly and invisible to JS — if requests return HTTP 401/403, re-import fresh cookies or check login in a visible window`);
+            console.warn(`[BrowserManager] Login check: NO arena auth cookie after import (${authProbe.detail}) — re-import a FULL fresh EditThisCookie export (make sure it contains "arena-auth-prod-v1" or the split "arena-auth-prod-v1.0"/".1"). Requests will fall back to anonymous sign-up.`);
         } else {
-            console.log(`[BrowserManager] Login check: no cookies imported (${authProbe}) — requests will run anonymously`);
+            console.log('[BrowserManager] Login check: no cookies imported — requests will use the automatic anonymous sign-up (Turnstile + reCAPTCHA) when arena asks for a session');
         }
 
         const instanceInfo = {
@@ -385,6 +422,22 @@ class BrowserManager {
             else if (ss === 'no_restriction' || ss === 'none') mapped.sameSite = 'None';
             out.push(mapped);
         }
+        // Google OAuth often stores the arena session as SPLIT cookies
+        // arena-auth-prod-v1.0 + arena-auth-prod-v1.1 — additionally provide the
+        // combined value under the plain name (mirrors CloudWaddie/LMArenaBridge)
+        const hasPlain = out.some(c => c.name === 'arena-auth-prod-v1');
+        if (!hasPlain) {
+            const p0 = out.find(c => c.name === 'arena-auth-prod-v1.0');
+            const p1 = out.find(c => c.name === 'arena-auth-prod-v1.1');
+            if (p0) {
+                out.push({
+                    name: 'arena-auth-prod-v1',
+                    value: (p0.value + (p1 ? p1.value : '')).trim(),
+                    domain: p0.domain, path: '/', httpOnly: p0.httpOnly, secure: true,
+                    ...(p0.expires ? { expires: p0.expires } : {})
+                });
+            }
+        }
         return out;
     }
 
@@ -392,13 +445,21 @@ class BrowserManager {
         if (!this.cookies || this.cookies.length === 0) return 0;
         const mapped = this._mapCookiesForPuppeteer(this.cookies);
         if (mapped.length === 0) return 0;
-        try {
-            await page.setCookie(...mapped);
-            return mapped.length;
-        } catch (e) {
-            console.log('[BrowserManager] setCookie note:', e.message);
-            return 0;
+        // Apply cookies ONE BY ONE — a single malformed entry must not kill the
+        // whole batch (previously one bad cookie silently undid the login!)
+        let ok = 0;
+        const failed = [];
+        for (const c of mapped) {
+            try {
+                await page.setCookie(c);
+                ok++;
+            } catch (e) {
+                failed.push(c.name + ' (' + String(e.message || e).split('\n')[0] + ')');
+            }
         }
+        if (failed.length) console.warn(`[BrowserManager] ${failed.length} cookie(s) rejected by Chrome: ${failed.join(', ')}`);
+        console.log(`[BrowserManager] Applied ${ok}/${mapped.length} stored cookies to the page`);
+        return ok;
     }
 
     async importCookies(cookies) {
@@ -407,20 +468,36 @@ class BrowserManager {
         if (mapped.length === 0) {
             throw new Error('No usable arena.ai / lmarena.ai cookies found in the JSON');
         }
+        const hasAuth = mapped.some(c => c.name === 'arena-auth-prod-v1' || c.name === 'arena-auth-prod-v1.0');
         this.cookies = cookies;
         try { await fs.writeFile(this.getCookiesFile(), JSON.stringify(cookies, null, 2), 'utf8'); } catch (e) {}
         let applied = 0;
         for (const page of this.pages) {
             try {
-                await page.setCookie(...mapped);
-                applied++;
+                const n = await this.applyCookiesToPage(page);
+                if (n > 0) applied++;
                 await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
             } catch (e) {
                 console.log('[BrowserManager] apply cookies note:', e.message);
             }
         }
-        console.log(`[BrowserManager] Imported ${mapped.length} arena cookies, applied to ${applied} page(s)`);
-        return { imported: mapped.length, appliedTo: applied };
+        console.log(`[BrowserManager] Imported ${mapped.length} arena cookies (auth session cookie: ${hasAuth ? 'YES' : 'NO — the export is missing arena-auth-prod-v1, login will NOT work!'}), applied to ${applied} page(s)`);
+        return { imported: mapped.length, appliedTo: applied, hasAuth };
+    }
+
+    // Reliable auth probe: Node-side cookie read SEES httpOnly cookies
+    // (unlike document.cookie inside the page)
+    async probeAuth(page) {
+        try {
+            const list = await page.cookies('https://arena.ai/', 'https://www.arena.ai/', 'https://lmarena.ai/');
+            const names = new Set(list.map(c => c.name));
+            if (names.has('arena-auth-prod-v1') || names.has('arena-auth-prod-v1.0')) {
+                return { authed: true, detail: names.has('arena-auth-prod-v1.0') ? 'arena-auth-prod-v1 (split .0/.1)' : 'arena-auth-prod-v1' };
+            }
+            return { authed: false, detail: list.length ? `${list.length} non-auth cookies` : 'no cookies' };
+        } catch (e) {
+            return { authed: false, detail: 'probe failed' };
+        }
     }
 
     getCookiesStatus() {

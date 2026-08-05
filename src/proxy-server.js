@@ -498,6 +498,14 @@ class ProxyServer {
         console.log('[ProxyServer] WebSocket server ready at /ws');
     }
 
+    // Log in-page diagnostics (attempt status, retries, sign-up stages) into the app Logs
+    _logWsMeta(data, requestId) {
+        if (!data || data.t !== 'meta') return false;
+        const rid = requestId ? requestId.substring(0, 8) + ' ' : '';
+        console.log(`[Arena ${data.s || 'meta'} ${rid}]`, typeof data.d === 'string' ? data.d : JSON.stringify(data.d));
+        return true;
+    }
+
     // ========== Forward requests to arena.ai via a WebSocket client ==========
     handleViaWsClient(client, requestId, spec, stream, res) {
         const wsMessage = {
@@ -533,6 +541,7 @@ class ProxyServer {
                     res.end();
                     return;
                 }
+                if (this._logWsMeta(data, requestId)) return;
 
                 const legacyText = this._legacyEventToText(data);
                 const actions = legacyText !== null ? sink.ingest(legacyText) : sink.ingest(data);
@@ -579,6 +588,7 @@ class ProxyServer {
                     client.activeRequests.delete(requestId);
                     return;
                 }
+                if (this._logWsMeta(data, requestId)) return;
                 const legacyText = this._legacyEventToText(data);
                 if (legacyText !== null) sink.ingest(legacyText); else sink.ingest(data);
                 if (sink.done || sink.error) client.activeRequests.delete(requestId);
@@ -630,6 +640,7 @@ class ProxyServer {
                         finish();
                         return;
                     }
+                    if (this._logWsMeta(data, requestId)) return;
                     const legacyText = this._legacyEventToText(data);
                     if (legacyText !== null) sink.ingest(legacyText); else sink.ingest(data);
                     if (sink.done || sink.error) {
@@ -713,6 +724,15 @@ class ProxyServer {
         })}\n\n`);
     }
 
+    // arena reports usage as {promptTokens, completionTokens} — normalize to OpenAI shape
+    _normalizeUsage(u) {
+        if (!u || typeof u !== 'object') return null;
+        const p = u.prompt_tokens ?? u.promptTokens ?? u.input_tokens ?? 0;
+        const c = u.completion_tokens ?? u.completionTokens ?? u.output_tokens ?? 0;
+        const t = u.total_tokens ?? u.totalTokens ?? (p + c);
+        return { prompt_tokens: p, completion_tokens: c, total_tokens: t };
+    }
+
     _writeSseFinal(res, requestId, model, sink) {
         const chunk = {
             id: requestId,
@@ -721,7 +741,8 @@ class ProxyServer {
             model: model,
             choices: [{ index: 0, delta: {}, finish_reason: sink.finishReasonSafe }]
         };
-        if (sink.usage) chunk.usage = sink.usage;
+        const usage = this._normalizeUsage(sink.usage);
+        if (usage) chunk.usage = usage;
         res.write(`data: ${JSON.stringify(chunk)}\n\n`);
     }
 
@@ -742,7 +763,8 @@ class ProxyServer {
                 finish_reason: sink.finishReasonSafe
             }]
         };
-        if (sink.usage) json.usage = sink.usage;
+        const usage = this._normalizeUsage(sink.usage);
+        if (usage) json.usage = usage;
         return json;
     }
 

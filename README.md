@@ -90,11 +90,11 @@ Launch the app and click "Start Service" | Запустите приложени
 3. Open [lmarena.ai](https://lmarena.ai) and log in with Google | Откройте [lmarena.ai](https://lmarena.ai) и войдите через Google
 4. The page title will show a checkmark when connected | При успешном подключении в заголовке страницы появится галочка
 
-**Alternative: Puppeteer Browser | Альтернатива: браузер Puppeteer**
+**Alternative: hidden Puppeteer instance (no browser window) | Альтернатива: скрытый инстанс Puppeteer (без окна браузера)**
 
-1. Click "New Instance" in the "Browser Instances" tab | Нажмите «New Instance» на вкладке «Browser Instances»
-2. Log in with Google in the new browser window | Войдите через Google в новом окне браузера
-3. Send one message to verify the connection | Отправьте одно сообщение, чтобы проверить подключение
+1. On the "Browser Instances" tab, paste session cookies exported from `arena.ai` (EditThisCookie → JSON) and click "Import Cookies" | На вкладке «Browser Instances» вставьте session-cookies, экспортированные с `arena.ai` (EditThisCookie → JSON), и нажмите «Import Cookies»
+2. The instance is created automatically on the first request — fully headless | Инстанс создаётся автоматически при первом запросе — полностью без окна
+3. No cookies? The instance tries an automatic **anonymous sign-up** on arena (Cloudflare Turnstile + reCAPTCHA) — watch the Logs to see it succeed | Нет cookies? Инстанс попробует автоматическую **анонимную регистрацию** на арене (Cloudflare Turnstile + reCAPTCHA) — следите за логами
 
 ### 4. Configure Client | Настройка клиента
 
@@ -205,6 +205,12 @@ AIProxyBridge/
 
 **429 Rate Limit Error? | Ошибка 429 (превышение лимита запросов)?**
 > This is reCAPTCHA verification. Try sending a message manually in the browser first, then retry. | Это проверка reCAPTCHA. Сначала отправьте сообщение вручную в браузере, затем повторите попытку.
+
+**HTTP 500 from arena.ai? | Ошибка HTTP 500 от arena.ai?**
+> Almost always means "no session": since March 2026 arena requires a signed-in (or anonymously signed-up) session for chat requests. The app reacts automatically: it performs the anonymous sign-up (`/nextjs-api/sign-up`: reCAPTCHA + Cloudflare Turnstile) and repeats the request — watch the Logs, you will see each step. If the sign-up cannot complete in your environment (Turnstile blocked), import fresh session cookies — the export must include `arena-auth-prod-v1` (or the split pair `arena-auth-prod-v1.0`/`.1`) and be pasted COMPLETELY (from `[{` to `}]`), otherwise JSON parsing fails. | Почти всегда означает «нет сессии»: с марта 2026 arena требует авторизованную (или анонимно зарегистрированную) сессию. Приложение реагирует автоматически: выполняет анонимную регистрацию (`/nextjs-api/sign-up`: reCAPTCHA + Cloudflare Turnstile) и повторяет запрос — смотрите каждый шаг в логах. Если регистрация не проходит в вашем окружении (Turnstile заблокирован), импортируйте свежие session-cookies — экспорт обязан содержать `arena-auth-prod-v1` (или разделённую пару `arena-auth-prod-v1.0`/`.1`) и быть вставлен ПОЛНОСТЬЮ (от `[{` до `}]`), иначе JSON не распарсится.
+
+**"Cookies don't log me in"? | «Куки не логинят»?**
+> Open the Logs right after importing: the app reports how many cookies Chrome accepted and whether the auth cookie is present (the check now sees httpOnly cookies). If some cookies are "rejected by Chrome", re-export them. Since 1.1.3 cookies are applied one-by-one, so a single malformed entry can no longer break the whole import. | Откройте логи сразу после импорта: приложение сообщает, сколько cookie принял Chrome и есть ли среди них auth-cookie (проверка теперь видит httpOnly-куки). Если какие-то cookie «rejected by Chrome» — экспортируйте заново. С версии 1.1.3 cookie применяются по одной, поэтому одна «битая» запись больше не ломает весь импорт.
 
 ---
 

@@ -1,6 +1,6 @@
 {
   "name": "aiproxybridge",
-  "version": "1.1.2",
+  "version": "1.1.3",
   "description": "AI API Proxy Bridge - Free access to Claude, GPT-4, Gemini via LMArena",
   "main": "main.js",
   "scripts": {
@@ -10,7 +10,9 @@
     "build:win": "electron-builder --win",
     "build:mac": "electron-builder --mac",
     "build:linux": "electron-builder --linux",
-    "postinstall": "electron-builder install-app-deps"
+    "postinstall": "electron-builder install-app-deps",
+    "test": "node tests/arena-client.test.js && node tests/e2e-ws.test.js",
+    "sync-userscript": "node scripts/sync-userscript.js"
   },
   "keywords": [
     "ai",
