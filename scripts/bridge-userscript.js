@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         arena
 // @namespace    http://tampermonkey.net/
-// @version      10.1
+// @version      10.2
 // @description  LMArena API - WebSocket client for AI Proxy Bridge (direct in-page fetch + streaming + reasoning)
 // @author       abc
 // @match        https://arena.ai/*
@@ -106,6 +106,30 @@
             return body;
         }
 
+        // Clone a captured real request body (survives arena side schema changes)
+        // and patch the per-request fields: fresh UUIDv7 ids, content, models, token.
+        function bodyFromTemplate(template, opts) {
+            const b = JSON.parse(JSON.stringify(template || {}));
+            b.id = uuid7();
+            b.userMessageId = uuid7();
+            b.modelAMessageId = uuid7();
+            const wantsB = (opts.mode === 'side-by-side' || opts.mode === 'battle') || ('modelBMessageId' in b);
+            if (wantsB) b.modelBMessageId = uuid7();
+            if (b.userMessage && typeof b.userMessage === 'object') {
+                b.userMessage.content = String(opts.content || '');
+            } else {
+                b.userMessage = { content: String(opts.content || ''), experimental_attachments: [], metadata: {} };
+            }
+            if (opts.mode) b.mode = opts.mode;
+            if (opts.mode === 'battle') { delete b.modelAId; delete b.modelBId; }
+            else if (opts.modelAId) b.modelAId = opts.modelAId;
+            if (opts.mode === 'side-by-side' && opts.modelBId) b.modelBId = opts.modelBId;
+            if (opts.mode !== 'side-by-side' && opts.mode !== 'battle') { delete b.modelBId; delete b.modelBMessageId; }
+            if (opts.modality && !('modality' in b)) b.modality = opts.modality;
+            b.recaptchaV3Token = opts.recaptchaToken || '';
+            return b;
+        }
+
         function payloadToText(v) {
             if (v == null) return '';
             if (typeof v === 'string') return v;
@@ -161,7 +185,7 @@
 
         async function attempt(opts, push) {
             const base = opts.base || location.origin;
-            const url = base.replace(/\/$/, '') + '/nextjs-api/stream/create-evaluation';
+            const url = opts.url || (base.replace(/\/$/, '') + '/nextjs-api/stream/create-evaluation');
             const resp = await fetch(url, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -207,16 +231,19 @@
                 for (let retry = 0; retry < 2; retry++) {
                     try {
                         const token = await mintRecaptcha('chat_submit');
-                        const body = buildBody({
+                        const bodyOpts = {
                             mode: mode,
                             modelAId: opts.modelAId || '',
                             modelBId: opts.modelBId || '',
                             content: opts.content || '',
                             modality: opts.modality || 'chat',
                             recaptchaToken: token
-                        });
-                        push({ t: 'meta', s: 'request', d: { mode: body.mode, modelAId: body.modelAId || '', modelBId: body.modelBId || '', modality: body.modality, hasToken: !!token, attempt: retry + 1 } });
-                        await attempt({ base: opts.base, body: body }, push);
+                        };
+                        const body = (opts.template && typeof opts.template === 'object')
+                            ? bodyFromTemplate(opts.template, bodyOpts)
+                            : buildBody(bodyOpts);
+                        push({ t: 'meta', s: 'request', d: { mode: body.mode, modelAId: body.modelAId || '', modelBId: body.modelBId || '', modality: body.modality, hasToken: !!token, cloned: !!opts.template, url: opts.url || 'default', attempt: retry + 1 } });
+                        await attempt({ base: opts.base, url: opts.url, body: body }, push);
                         push({ t: 'done', s: mode, d: { mode: body.mode, sessionId: body.id } });
                         return;
                     } catch (e) {
@@ -238,7 +265,7 @@
             push({ t: 'done', s: mode, d: { mode: mode, failed: true } });
         }
 
-        return { run: run, mintRecaptcha: mintRecaptcha, uuid7: uuid7, buildBody: buildBody };
+        return { run: run, mintRecaptcha: mintRecaptcha, uuid7: uuid7, buildBody: buildBody, bodyFromTemplate: bodyFromTemplate };
     }
     // ============================================================================
     // END SYNC-WITH-ARENA-CLIENT
@@ -246,7 +273,13 @@
 
     const arenaExec = arenaExecFactory();
 
-    // ========== Fetch tap: capture model UUIDs + reCAPTCHA tokens from real page traffic ==========
+    // ========== Fetch tap: capture the real request template (self-healing against site changes) ==========
+    // When YOU send a message on arena.ai by hand, the exact request shape (URL + body
+    // with every field the site uses today) is remembered and later cloned by the proxy.
+    let capturedUrl = '';
+    let capturedBodyTemplate = null;
+    let capturedMode = '';
+
     const originalFetch = window.fetch;
     window.fetch = async function (...args) {
         try {
@@ -258,15 +291,31 @@
                 const options = args[1] || {};
                 let body = null;
                 if (options.body) { try { body = JSON.parse(options.body); } catch (e) {} }
-                if (body && body.recaptchaV3Token) window.recaptchaToken = body.recaptchaV3Token;
-                if (body && body.modelAId && /^[0-9a-f]{8}-/i.test(body.modelAId)) {
-                    addModelMapping('captured-modelAId', body.modelAId, 'Captured Model');
-                    tryCaptureModelSelection(body.modelAId);
+                if (body && typeof body === 'object' && body.userMessage) {
+                    if (body.recaptchaV3Token) window.recaptchaToken = body.recaptchaV3Token;
+                    if (body.modelAId && /^[0-9a-f]{8}-/i.test(body.modelAId)) {
+                        addModelMapping('captured-modelAId', body.modelAId, 'Captured Model');
+                        tryCaptureModelSelection(body.modelAId);
+                    }
+                    capturedUrl = urlString;
+                    capturedBodyTemplate = JSON.parse(JSON.stringify(body));
+                    capturedMode = String(body.mode || '');
+                    console.log(`[LMArena API] Captured request template: mode=${capturedMode || '?'}, url=${urlString.slice(0, 90)}, keys=${Object.keys(body).join(',')}`);
+                    sendApiInfoToServer();
                 }
             }
         } catch (e) {}
         return originalFetch.apply(this, args);
     };
+
+    function sendApiInfoToServer() {
+        if (socket && socket.readyState === WebSocket.OPEN && capturedBodyTemplate) {
+            socket.send(JSON.stringify({
+                type: 'api_info',
+                data: { url: capturedUrl, mode: capturedMode, body: capturedBodyTemplate }
+            }));
+        }
+    }
 
     // ========== Add model mapping ==========
     function addModelMapping(slug, uuid, displayName) {
@@ -719,6 +768,7 @@
             document.title = "✅ " + document.title.replace(/^✅\s*/, '');
             sendPageSourceViaWs();
             sendModelDataToServer();
+            sendApiInfoToServer();
         };
 
         socket.onmessage = async (event) => {
@@ -768,13 +818,20 @@
                             sendToServer(request_id, evt);
                         };
 
-                        await arenaExec.run({
-                            mode: data.mode || 'direct',
-                            modelAId: modelAId,
-                            modelBId: modelBId,
-                            content: data.content || 'Hello',
-                            modality: data.modality || 'chat'
-                        }, push);
+                        window.isProxyRequest = true; // never capture our own requests as the template
+                        try {
+                            await arenaExec.run({
+                                mode: data.mode || 'direct',
+                                modelAId: modelAId,
+                                modelBId: modelBId,
+                                content: data.content || 'Hello',
+                                modality: data.modality || 'chat',
+                                template: capturedBodyTemplate || data.template || null,
+                                url: capturedUrl || data.url || ''
+                            }, push);
+                        } finally {
+                            window.isProxyRequest = false;
+                        }
 
                         console.log(`[LMArena API] Request ${request_id.substring(0, 8)} finished`);
                     } catch (error) {

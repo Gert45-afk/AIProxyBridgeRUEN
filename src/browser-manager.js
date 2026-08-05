@@ -308,6 +308,24 @@ class BrowserManager {
             console.log(`[BrowserManager] Instance landed on: ${landedUrl}`);
         }
 
+        // Login probe: is the readable arena auth cookie present after cookie import?
+        let authProbe = 'no-cookies';
+        try {
+            authProbe = await page.evaluate(() => {
+                try {
+                    return document.cookie.includes('arena-auth-prod') ? 'auth-cookie-present'
+                        : (document.cookie ? 'foreign-cookies-only' : 'no-cookies');
+                } catch (e) { return 'unknown'; }
+            });
+        } catch (e) {}
+        if (authProbe === 'auth-cookie-present') {
+            console.log('[BrowserManager] Login check: arena auth cookie IS present — the instance is authenticated');
+        } else if (this.cookies && this.cookies.length > 0) {
+            console.warn(`[BrowserManager] Login check: arena auth cookie NOT readable after import (${authProbe}). Note: the auth cookie may be httpOnly and invisible to JS — if requests return HTTP 401/403, re-import fresh cookies or check login in a visible window`);
+        } else {
+            console.log(`[BrowserManager] Login check: no cookies imported (${authProbe}) — requests will run anonymously`);
+        }
+
         const instanceInfo = {
             id: this.browsers.length + 1,
             status: 'active',

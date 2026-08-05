@@ -305,6 +305,11 @@ class ProxyServer {
     _resolveSpec(spec) {
         spec.modelAId = (spec.mode === 'battle') ? '' : this.resolveModelUuid(spec.modelA);
         spec.modelBId = (spec.mode === 'side-by-side' && spec.modelB) ? this.resolveModelUuid(spec.modelB) : '';
+        // Clone the site's real request shape when we captured one (self-healing)
+        if (this.capturedApiInfo && this.capturedApiInfo.body) {
+            spec.template = this.capturedApiInfo.body;
+            if (this.capturedApiInfo.url) spec.url = this.capturedApiInfo.url;
+        }
         try {
             const caps = this.browserManager.getModelCapabilities
                 ? this.browserManager.getModelCapabilities(spec.modelA)
@@ -401,10 +406,11 @@ class ProxyServer {
                         return;
                     }
 
-                    // Handle captured API info
+                    // Handle captured request template (real create-evaluation shape from the page)
                     if (msg.type === 'api_info' && msg.data) {
                         this.capturedApiInfo = msg.data;
-                        console.log(`[WS] Captured API info: url=${msg.data.url}, headers=${Object.keys(msg.data.headers || {}).join(',')}`);
+                        const bodyKeys = msg.data.body && typeof msg.data.body === 'object' ? Object.keys(msg.data.body).join(',') : '-';
+                        console.log(`[WS] Captured request template: mode=${msg.data.mode || '?'}, url=${(msg.data.url || '').slice(0, 90)}, body keys: ${bodyKeys}`);
                         return;
                     }
 
@@ -503,6 +509,8 @@ class ProxyServer {
                 modelBId: spec.modelBId || '',
                 mode: spec.mode,
                 modality: spec.modality,
+                template: spec.template || null,
+                url: spec.url || '',
                 content: spec.content
             }
         };
@@ -639,6 +647,8 @@ class ProxyServer {
                             modelBId: spec.modelBId || '',
                             mode: spec.mode,
                             modality: spec.modality,
+                            template: spec.template || null,
+                            url: spec.url || '',
                             content: spec.content
                         }
                     }));

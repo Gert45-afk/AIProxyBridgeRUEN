@@ -100,6 +100,30 @@ function arenaExecFactory() {
         return body;
     }
 
+    // Clone a captured real request body (survives arena side schema changes)
+    // and patch the per-request fields: fresh UUIDv7 ids, content, models, token.
+    function bodyFromTemplate(template, opts) {
+        const b = JSON.parse(JSON.stringify(template || {}));
+        b.id = uuid7();
+        b.userMessageId = uuid7();
+        b.modelAMessageId = uuid7();
+        const wantsB = (opts.mode === 'side-by-side' || opts.mode === 'battle') || ('modelBMessageId' in b);
+        if (wantsB) b.modelBMessageId = uuid7();
+        if (b.userMessage && typeof b.userMessage === 'object') {
+            b.userMessage.content = String(opts.content || '');
+        } else {
+            b.userMessage = { content: String(opts.content || ''), experimental_attachments: [], metadata: {} };
+        }
+        if (opts.mode) b.mode = opts.mode;
+        if (opts.mode === 'battle') { delete b.modelAId; delete b.modelBId; }
+        else if (opts.modelAId) b.modelAId = opts.modelAId;
+        if (opts.mode === 'side-by-side' && opts.modelBId) b.modelBId = opts.modelBId;
+        if (opts.mode !== 'side-by-side' && opts.mode !== 'battle') { delete b.modelBId; delete b.modelBMessageId; }
+        if (opts.modality && !('modality' in b)) b.modality = opts.modality;
+        b.recaptchaV3Token = opts.recaptchaToken || '';
+        return b;
+    }
+
     // ---------- stream line parsing ----------
     function payloadToText(v) {
         if (v == null) return '';
@@ -158,7 +182,7 @@ function arenaExecFactory() {
     // ---------- one HTTP attempt ----------
     async function attempt(opts, push) {
         const base = opts.base || location.origin;
-        const url = base.replace(/\/$/, '') + '/nextjs-api/stream/create-evaluation';
+        const url = opts.url || (base.replace(/\/$/, '') + '/nextjs-api/stream/create-evaluation');
         const resp = await fetch(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -207,20 +231,19 @@ function arenaExecFactory() {
             for (let retry = 0; retry < 2; retry++) {
                 try {
                     const token = await mintRecaptcha('chat_submit');
-                    const body = buildBody({
+                    const bodyOpts = {
                         mode: mode,
                         modelAId: opts.modelAId || '',
                         modelBId: opts.modelBId || '',
                         content: opts.content || '',
                         modality: opts.modality || 'chat',
                         recaptchaToken: token
-                    });
-                    push({ t: 'meta', s: 'request', d: { mode: body.mode, modelAId: body.modelAId || '', modelBId: body.modelBId || '', modality: body.modality, hasToken: !!token, attempt: retry + 1 } });
-                    if (m === 0 && retry === 0) {
-                        // first attempt: count how many events we get; 'unknown mode' style
-                        // failures are detected via HTTP error codes instead
-                    }
-                    await attempt({ base: opts.base, body: body }, push);
+                    };
+                    const body = (opts.template && typeof opts.template === 'object')
+                        ? bodyFromTemplate(opts.template, bodyOpts)
+                        : buildBody(bodyOpts);
+                    push({ t: 'meta', s: 'request', d: { mode: body.mode, modelAId: body.modelAId || '', modelBId: body.modelBId || '', modality: body.modality, hasToken: !!token, cloned: !!opts.template, url: opts.url || 'default', attempt: retry + 1 } });
+                    await attempt({ base: opts.base, url: opts.url, body: body }, push);
                     push({ t: 'done', s: mode, d: { mode: body.mode, sessionId: body.id } });
                     return;
                 } catch (e) {
@@ -244,7 +267,7 @@ function arenaExecFactory() {
         push({ t: 'done', s: mode, d: { mode: mode, failed: true } });
     }
 
-    return { run: run, mintRecaptcha: mintRecaptcha, uuid7: uuid7, buildBody: buildBody };
+    return { run: run, mintRecaptcha: mintRecaptcha, uuid7: uuid7, buildBody: buildBody, bodyFromTemplate: bodyFromTemplate };
 }
 
 // Source used for page.evaluateOnNewDocument injection — defines globalThis.__arenaExec

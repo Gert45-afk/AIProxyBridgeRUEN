@@ -1,6 +1,6 @@
 {
   "name": "aiproxybridge",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "AI API Proxy Bridge - Free access to Claude, GPT-4, Gemini via LMArena",
   "main": "main.js",
   "scripts": {
