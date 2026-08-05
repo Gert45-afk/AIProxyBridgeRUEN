@@ -322,6 +322,12 @@ class BrowserManager {
         this.pages.push(page);
         this.instanceInfos.push(instanceInfo);
         console.log(`[BrowserManager] Created instance #${instanceInfo.id}, URL: ${page.url()}`);
+
+        // Refresh the model list right away (gives UUIDs + capabilities for model selection)
+        this.updateModels().then(() => {
+            console.log(`[BrowserManager] Models after instance start: ${this.models.length}, UUID mappings: ${Object.keys(this.modelUuidMap).length}`);
+        }).catch(() => {});
+
         return { browser, page, info: instanceInfo };
     }
 

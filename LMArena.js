@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         arena
 // @namespace    http://tampermonkey.net/
-// @version      10.0
+// @version      10.1
 // @description  LMArena API - WebSocket client for AI Proxy Bridge (direct in-page fetch + streaming + reasoning)
 // @author       abc
 // @match        https://arena.ai/*
@@ -345,7 +345,7 @@
     //   - an array of slugs:      ["gpt-4o", "claude-sonnet-4.5", ...]
     //   - an array of objects:    [{ id: <uuid>, publicName: "...", capabilities: {...} }]
     //   - a dict keyed by slug:   { "gpt-4o": {...} }
-    function extractModelsFromRSC() {
+    function extractModelsFromRSC(sourceTexts) {
         const models = [];
         const seen = new Set();
         let modelAId = '';
@@ -431,10 +431,16 @@
         }
 
         try {
-            const scripts = document.querySelectorAll('script');
+            let scriptTexts = sourceTexts;
+            if (!scriptTexts) {
+                scriptTexts = [];
+                for (const script of document.querySelectorAll('script')) {
+                    const content = script.textContent || '';
+                    if (content) scriptTexts.push(content);
+                }
+            }
             let combinedText = '';
-            for (const script of scripts) {
-                const content = script.textContent || '';
+            for (const content of scriptTexts) {
                 if (!content) continue;
                 if (!(content.includes('initialModels') || content.includes('initialModelAId') || content.includes('__next_f'))) continue;
                 combinedText += '\n' + content.slice(0, 3000000);
@@ -479,7 +485,7 @@
                 } catch (e) {}
             }
 
-            if (window.__NEXT_DATA__) {
+            if (!sourceTexts && window.__NEXT_DATA__) {
                 try {
                     const str = JSON.stringify(window.__NEXT_DATA__);
                     let frag = extractJsonAfterKey(str, 'initialModels');
@@ -549,13 +555,42 @@
         return extracted;
     }
 
+    // ========== Fetch the direct-chat page and extract models from its HTML ==========
+    // The battle/landing page may not embed initialModels — the ?mode=direct page does.
+    async function fetchDirectPageTexts() {
+        const texts = [];
+        try {
+            const resp = await originalFetch(location.origin + '/?mode=direct', { credentials: 'include' });
+            if (resp.ok) {
+                const t = await resp.text();
+                if (t && t.length > 1000) texts.push(t);
+            }
+        } catch (e) {
+            console.warn('[LMArena API] Failed to fetch /?mode=direct for models:', e.message);
+        }
+        return texts;
+    }
+
     // ========== Combined model data extraction ==========
     async function extractAllModelData() {
         const rscData = extractModelsFromRSC();
         modelSlugList = rscData.models;
         initialModelAId = rscData.modelAId;
 
-        console.log(`[LMArena API] RSC extraction: ${modelSlugList.length} slugs, initialModelAId: ${initialModelAId || 'none'}`);
+        console.log(`[LMArena API] RSC extraction (page): ${modelSlugList.length} slugs, ${Object.keys(modelUuidMap).length} mappings, initialModelAId: ${initialModelAId || 'none'}`);
+
+        // The current page (battle/landing) may embed little or no model data —
+        // fetch the direct-chat page and extract from its HTML instead
+        if (modelSlugList.length < 5 || Object.keys(modelUuidMap).length < 3) {
+            const fetchedTexts = await fetchDirectPageTexts();
+            for (const t of fetchedTexts) {
+                const r2 = extractModelsFromRSC([t]);
+                let added = 0;
+                for (const m of r2.models) { if (!modelSlugList.includes(m)) { modelSlugList.push(m); added++; } }
+                if (!initialModelAId && r2.modelAId) initialModelAId = r2.modelAId;
+                console.log(`[LMArena API] RSC extraction (fetched /?mode=direct): +${added} slugs, ${Object.keys(modelUuidMap).length} mappings total`);
+            }
+        }
 
         if (modelSlugList.length === 0) {
             const htmlSlugs = extractModelsFromPageHTML();
@@ -718,6 +753,9 @@
                     try {
                         const modelAId = data.modelAId || resolveModelAId(data.model || '');
                         const modelBId = data.modelBId || (data.modelB ? resolveModelAId(data.modelB) : '');
+                        if (!modelAId && (data.mode || 'direct') !== 'battle') {
+                            console.warn('[LMArena API] No model UUID resolved — the model list may not be loaded yet; sending without modelAId (arena default model will answer)');
+                        }
 
                         sendStatus(request_id, 'executing', `Running ${data.mode || 'direct'} request on the page (model: ${data.model || modelAId})`);
 
